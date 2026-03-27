@@ -167,6 +167,9 @@ class OptimalLwtSensor(MpcBaseSensor):
                     "tank_energy_kwh": round(p.tank_energy_kwh, 3),
                     "tank_temp_c": round(p.tank_temp_c, 1),
                     "electricity_cost": round(p.electricity_cost, 4),
+                    "dhw_on": p.dhw_on,
+                    "dhw_heat_delivered_kwh": round(p.dhw_heat_delivered_kwh, 3),
+                    "dhw_tank_temp_c": round(p.dhw_tank_temp_c, 1),
                 }
                 for p in schedule
             ],

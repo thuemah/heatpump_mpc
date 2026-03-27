@@ -49,7 +49,6 @@
         "data": {
           "electrical_energy_sensor": "Electrical Energy Sensor",
           "thermal_power_sensor": "Thermal Power Sensor (Heat Meter)",
-          "compressor_freq_sensor": "Compressor Frequency Sensor",
           "use_flow_sensors": "Use Flow & Temperature Sensors (Track B)",
           "flow_rate_sensor": "Water Flow Rate Sensor",
           "flow_unit": "Flow Unit",
@@ -59,7 +58,6 @@
         "data_description": {
           "electrical_energy_sensor": "Cumulative energy consumption (kWh) of the heat pump. Crucial for COP learning.",
           "thermal_power_sensor": "Instantaneous thermal output (kW) from a dedicated heat meter. This is the most accurate source for thermal power.",
-          "compressor_freq_sensor": "Compressor frequency (Hz) from the Modbus interface. Helps detect full-capacity operation and learn how output drops at low outdoor temperatures.",
           "use_flow_sensors": "Enable this if you have a flow sensor and supply/return temperature sensors instead of a dedicated heat meter. The system will calculate thermal power using flow \u00d7 \u0394T.",
           "flow_rate_sensor": "Water volume flow sensor on the heat pump circuit.",
           "flow_unit": "The unit of measurement used by the flow rate sensor.",
@@ -131,7 +129,6 @@
         "data": {
           "electrical_energy_sensor": "Electrical Energy Sensor",
           "thermal_power_sensor": "Thermal Power Sensor (Heat Meter)",
-          "compressor_freq_sensor": "Compressor Frequency Sensor",
           "use_flow_sensors": "Use Flow & Temperature Sensors (Track B)",
           "flow_rate_sensor": "Water Flow Rate Sensor",
           "flow_unit": "Flow Unit",
@@ -141,7 +138,6 @@
         "data_description": {
           "electrical_energy_sensor": "Cumulative energy consumption (kWh) of the heat pump. Crucial for COP learning.",
           "thermal_power_sensor": "Instantaneous thermal output (kW) from a dedicated heat meter. This is the most accurate source for thermal power.",
-          "compressor_freq_sensor": "Compressor frequency (Hz) from the Modbus interface. Helps detect full-capacity operation and learn how output drops at low outdoor temperatures.",
           "use_flow_sensors": "Enable this if you have a flow sensor and supply/return temperature sensors instead of a dedicated heat meter. The system will calculate thermal power using flow \u00d7 \u0394T.",
           "flow_rate_sensor": "Water volume flow sensor on the heat pump circuit.",
           "flow_unit": "The unit of measurement used by the flow rate sensor.",
@@ -158,12 +154,59 @@
           "tank_standby_loss_kwh": "Tank Standby Heat Loss",
           "start_penalty_kwh": "Compressor Start Penalty"
         }
+      },
+      "dhw": {
+        "title": "Domestic Hot Water (DHW)",
+        "description": "Optional: let the MPC schedule DHW reheating in the cheapest hours and prevent the heat pump from running DHW at expensive times.\n\nEnable this only if your heat pump has a separate DHW tank and you can control the DHW target temperature setpoint from Home Assistant.",
+        "data": {
+          "dhw_enabled": "Enable DHW Scheduling",
+          "dhw_temp_sensor": "DHW Tank Temperature Sensor",
+          "dhw_tank_volume_liters": "DHW Tank Volume",
+          "dhw_min_temp": "DHW Minimum Temperature",
+          "dhw_target_temp": "DHW Target Temperature",
+          "dhw_lwt": "DHW Leaving Water Temperature",
+          "dhw_daily_demand_kwh": "Daily DHW Demand"
+        },
+        "data_description": {
+          "dhw_enabled": "Enable DHW tank scheduling and COP contamination filtering.",
+          "dhw_temp_sensor": "Sensor reporting the current temperature of the DHW tank. Used to initialise the tank model and to detect when the heat pump is running in DHW mode (COP filter).",
+          "dhw_tank_volume_liters": "Volume of your DHW storage tank in litres.",
+          "dhw_min_temp": "Temperature below which the DHW tank is considered depleted and reheating is mandatory. Typically 40–45 °C.",
+          "dhw_target_temp": "Temperature the heat pump heats the DHW tank to. Typically 55 °C.",
+          "dhw_lwt": "Fixed flow temperature used when the heat pump runs in DHW mode. Must be at least as high as the target temperature. Typically 55–60 °C.",
+          "dhw_daily_demand_kwh": "Estimated thermal energy drawn from the DHW tank per day (kWh). Typical household: 2–5 kWh/day. Distributed evenly over 24 hours for planning."
+        }
+      },
+      "reconfigure_dhw": {
+        "title": "Edit: Domestic Hot Water (DHW)",
+        "description": "Update DHW tank scheduling settings.",
+        "data": {
+          "dhw_enabled": "Enable DHW Scheduling",
+          "dhw_temp_sensor": "DHW Tank Temperature Sensor",
+          "dhw_tank_volume_liters": "DHW Tank Volume",
+          "dhw_min_temp": "DHW Minimum Temperature",
+          "dhw_target_temp": "DHW Target Temperature",
+          "dhw_lwt": "DHW Leaving Water Temperature",
+          "dhw_daily_demand_kwh": "Daily DHW Demand"
+        },
+        "data_description": {
+          "dhw_enabled": "Enable DHW tank scheduling and COP contamination filtering.",
+          "dhw_temp_sensor": "Sensor reporting the current temperature of the DHW tank.",
+          "dhw_tank_volume_liters": "Volume of your DHW storage tank in litres.",
+          "dhw_min_temp": "Temperature below which the DHW tank is considered depleted.",
+          "dhw_target_temp": "Temperature the heat pump heats the DHW tank to.",
+          "dhw_lwt": "Fixed flow temperature used when the heat pump runs in DHW mode.",
+          "dhw_daily_demand_kwh": "Estimated thermal energy drawn from the DHW tank per day (kWh)."
+        }
       }
     },
     "error": {
       "max_lwt_below_min": "Maximum flow temperature must be strictly higher than the minimum.",
       "max_tank_below_max_lwt": "The tank safety ceiling must be at least as high as the maximum flow temperature.",
-      "lwt_mild_above_cold": "Mild-weather flow temperature must be lower than the cold-weather flow temperature."
+      "lwt_mild_above_cold": "Mild-weather flow temperature must be lower than the cold-weather flow temperature.",
+      "min_output_above_max": "Minimum output must be strictly lower than the nominal full-load output.",
+      "dhw_target_below_min": "DHW target temperature must be higher than the minimum temperature.",
+      "dhw_lwt_below_target": "DHW leaving water temperature must be at least as high as the target temperature."
     },
     "abort": {
       "already_configured": "This integration instance is already configured."

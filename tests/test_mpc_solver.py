@@ -137,6 +137,85 @@ def test_simulate_lwt_charging_ceiling(solver, config):
     assert states_high[0]["heat_in"] > 0.0
 
 
+def test_simulate_low_mass_pass_through(solver):
+    """Pass-through heat delivery for direct-coupled / low-mass systems.
+
+    When a tiny buffer tank (50 L) saturates at the LWT ceiling within
+    minutes at full output, the old model blocked all subsequent charging
+    because headroom dropped to zero.  The fix accounts for demand drain
+    during the hour, allowing the pump to deliver heat continuously even
+    when the tank starts the hour right at the ceiling.
+
+    The physics invariant is preserved: when the tank temperature is
+    *above* the LWT (pump water cooler than tank), heat_in must still be
+    zero — heat cannot flow uphill.
+    """
+    small_config = MpcConfig(
+        min_lwt=25.0,
+        max_lwt=45.0,
+        max_tank_temp=45.0,
+        heat_pump_output_kw=12.0,
+        tank_volume_liters=50.0,
+        lwt_step=4.0,
+        tank_standby_loss_kwh=0.05,
+        min_output_kw=3.0,
+    )
+    kwh_per_k = 50.0 * 1.16e-3  # 0.058 kWh/K
+
+    # Tank already at the LWT ceiling (29 °C → max_charge_energy for LWT=29).
+    # max_charge_energy = (29-25)*0.058 = 0.232 kWh
+    tank_at_ceiling = (29.0 - 25.0) * kwh_per_k  # 0.232 kWh
+
+    house_demand = 1.5  # kWh/h — cannot be met by stored energy alone
+    horizon = [HorizonPoint(price=1.0, t_outdoor=5.0, rh=60.0, house_demand=house_demand)]
+    metrics = [{"effective_output_kw": 12.0, "max_capacity_kw": 12.0}]
+    pump_on = [True]
+
+    states, _ = solver._simulate(horizon, metrics, pump_on, small_config, tank_at_ceiling, lwt=29.0)
+
+    # With pass-through the pump delivers demand + standby even though the
+    # tank started at the ceiling.  heat_in = min(12, 0 + 1.5 + 0.05) = 1.55
+    assert abs(states[0]["heat_in"] - (house_demand + small_config.tank_standby_loss_kwh)) < 1e-6
+    # Tank ends exactly at the ceiling (demand was fully met).
+    assert abs(states[0]["tank_end"] - tank_at_ceiling) < 1e-6
+
+    # Physics preserved: tank ABOVE LWT → heat_in must be zero.
+    # Force tank above the LWT=29 ceiling and verify the pump is blocked.
+    tank_above_ceiling = tank_at_ceiling + 0.5  # above ceiling
+    states_blocked, _ = solver._simulate(
+        horizon, metrics, pump_on, small_config, tank_above_ceiling, lwt=29.0
+    )
+    assert states_blocked[0]["heat_in"] == 0.0
+
+
+def test_solve_low_mass_system_feasible(solver):
+    """End-to-end: solver must produce a feasible schedule for a low-mass system.
+
+    Reproduces the Rachid fan-coil scenario: 50 L buffer, demand of ~1.6 kWh/h
+    for 24 hours.  With the charging-ceiling fix the solver must be able to
+    schedule enough pump-on hours to cover the demand and return feasible=True.
+    """
+    small_config = MpcConfig(
+        min_lwt=25.0,
+        max_lwt=45.0,
+        max_tank_temp=45.0,
+        heat_pump_output_kw=12.0,
+        tank_volume_liters=50.0,
+        lwt_step=4.0,
+        tank_standby_loss_kwh=0.05,
+        min_output_kw=3.0,
+    )
+    horizon = [
+        HorizonPoint(price=float(1 + (t % 3)), t_outdoor=5.0, rh=60.0, house_demand=1.6)
+        for t in range(24)
+    ]
+    result = solver.solve(horizon, 25.5, small_config)
+
+    assert result.feasible
+    # Pump must run for multiple hours to cover the demand.
+    assert sum(1 for p in result.schedule if p.pump_on) > 1
+
+
 def test_solve_rejects_lwt_below_tank_temp(solver, config):
     """Solver must not choose an LWT below the current tank temperature
     when the pump is forced to run.
@@ -236,3 +315,62 @@ def test_start_penalty_adds_cost(solver, config):
         if p.start_event:
             assert p.pump_on
             assert i == 0 or not r_with.schedule[i - 1].pump_on
+
+
+def test_dhw_phase2_does_not_starve_sh():
+    """DHW Phase 2 must not book every hour for DHW maintenance.
+
+    Reproduces the bug where a small DHW tank with high daily demand (~10 kWh/day)
+    caused Phase 2 to schedule DHW for ALL available hours because each hour had
+    tiny demand-drain headroom (heat_in ≈ demand > 0).  The SH pump was left with
+    zero available hours, draining the SH tank to negative → infeasible schedule.
+
+    After the fix, Phase 2 only keeps hours that deliver net-positive energy to
+    the DHW tank (heat_in > dhw_demand), leaving enough slots for SH.
+    """
+    config = MpcConfig(
+        min_lwt=25.0,
+        max_lwt=55.0,
+        max_tank_temp=55.0,
+        heat_pump_output_kw=9.0,
+        tank_volume_liters=300.0,
+        lwt_step=5.0,
+        tank_standby_loss_kwh=0.05,
+        min_output_kw=3.0,
+        dhw_enabled=True,
+        dhw_tank_volume_liters=180.0,
+        dhw_min_temp=40.0,
+        dhw_target_temp=55.0,
+        dhw_lwt=55.0,
+        # ~10.5 kWh/day — high relative to 180 L tank capacity (~3.1 kWh).
+        # Per-hour demand = 10.512 / 24 ≈ 0.438 kWh, matching user's observed data.
+    )
+    # Inject DHW demand directly into horizon points.
+    dhw_demand_per_hour = 10.512 / 24
+    horizon = [
+        HorizonPoint(
+            price=float(1 + (t % 3) * 0.5),
+            t_outdoor=5.0,
+            rh=60.0,
+            house_demand=1.7,
+            dhw_demand=dhw_demand_per_hour,
+        )
+        for t in range(24)
+    ]
+
+    solver = MpcSolver(MockHeatPumpModel())
+    # DHW tank starts at target; SH tank starts warm (48 °C).
+    result = solver.solve(horizon, 48.0, config, dhw_tank_temp_init=55.0)
+
+    # SH pump must have been scheduled for at least some hours.
+    sh_hours = sum(1 for p in result.schedule if p.pump_on)
+    assert sh_hours > 0, (
+        f"SH pump was never scheduled — DHW Phase 2 likely blocked all hours "
+        f"(dhw_on count: {sum(1 for p in result.schedule if p.dhw_on)})"
+    )
+
+    # DHW hours should be limited (not every single hour).
+    dhw_hours = sum(1 for p in result.schedule if p.dhw_on)
+    assert dhw_hours < len(horizon), (
+        f"DHW scheduled for every hour ({dhw_hours}/{len(horizon)}), starving SH"
+    )

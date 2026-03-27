@@ -107,7 +107,7 @@ class HeatpumpMpcStorage:
             _LOGGER.debug(
                 "Loaded learner state: η=%.4f f_defrost=%.4f "
                 "cap@-15°C=%.3f (n=%d) cap@-7°C=%.3f (n=%d) "
-                "clean_samples=%d freq_obs=%d",
+                "clean_samples=%d",
                 state.eta_carnot,
                 state.f_defrost,
                 state.capacity_frac_minus15,
@@ -115,7 +115,6 @@ class HeatpumpMpcStorage:
                 state.capacity_frac_minus7,
                 state.capacity_minus7_samples,
                 state.eta_carnot_samples,
-                state.freq_obs_count,
             )
             return state
         except Exception as err:

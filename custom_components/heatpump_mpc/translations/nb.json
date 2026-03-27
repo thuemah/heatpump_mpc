@@ -49,7 +49,6 @@
         "data": {
           "electrical_energy_sensor": "Elektrisk energisensor",
           "thermal_power_sensor": "Termisk effektsensor (varmem\u00e5ler)",
-          "compressor_freq_sensor": "Kompressorfrekvenssensor",
           "use_flow_sensors": "Bruk flow- og temperatursensorer (Track B)",
           "flow_rate_sensor": "Sensor for vannstr\u00f8mning (flow)",
           "flow_unit": "Str\u00f8mningsenhet (flow)",
@@ -59,7 +58,6 @@
         "data_description": {
           "electrical_energy_sensor": "Akkumulert energiforbruk (kWh) for varmepumpen. Avgj\u00f8rende for COP-l\u00e6ring.",
           "thermal_power_sensor": "\u00d8yeblikkelig termisk effekt (kW) fra en dedikert varmem\u00e5ler. Dette er den mest n\u00f8yaktige kilden for termisk effekt.",
-          "compressor_freq_sensor": "Kompressorfrekvens (Hz) fra Modbus-grensesnittet. Hjelper med \u00e5 oppdage drift med full kapasitet og l\u00e6re hvordan effekten faller ved lave utetemperaturer.",
           "use_flow_sensors": "Aktiver dette hvis du har en str\u00f8mningssensor og tur/retur-temperatursensorer i stedet for en dedikert varmem\u00e5ler. Systemet vil beregne termisk effekt ved hjelp av str\u00f8mning \u00d7 \u0394T.",
           "flow_rate_sensor": "Vannstr\u00f8mningssensor p\u00e5 varmepumpekretsen.",
           "flow_unit": "M\u00e5leenheten som brukes av str\u00f8mningssensoren.",
@@ -78,7 +76,8 @@
         "data_description": {
           "horizon_hours": "Hvor mange timer fremover optimalisereren planlegger. 24 timer anbefales. Utvid til 36\u201348 timer hvis morgendagens str\u00f8mpriser er tilgjengelige tidlig.",
           "lwt_step": "Temperatur\u00f8kningen mellom kandidat-turtemperaturer evaluert av l\u00f8seren. Et mindre steg er mer presist, men tar lengre tid \u00e5 beregne.",
-          "tank_standby_loss_kwh": "Estimert varmetap fra akkumulatortanken per time (kWh) p\u00e5 grunn av ufullstendig isolasjon."
+          "tank_standby_loss_kwh": "Estimert varmetap fra akkumulatortanken per time (kWh) p\u00e5 grunn av ufullstendig isolasjon.",
+          "start_penalty_kwh": "Elektrisk energiekvivalent (kWh) som legges til scenariokostnaden for hver kompressorstart. Straffer fragmenterte kj\u00f8resykluser og oppmuntrer til f\u00e6rre, lengre driftsperioder. 0,2 kWh \u2248 10 minutter ineffektiv oppstart. Sett til 0 for \u00e5 deaktivere."
         }
       },
       "reconfigure": {
@@ -129,7 +128,6 @@
         "data": {
           "electrical_energy_sensor": "Elektrisk energisensor",
           "thermal_power_sensor": "Termisk effektsensor (varmem\u00e5ler)",
-          "compressor_freq_sensor": "Kompressorfrekvenssensor",
           "use_flow_sensors": "Bruk flow- og temperatursensorer (Track B)",
           "flow_rate_sensor": "Sensor for vannstr\u00f8mning (flow)",
           "flow_unit": "Str\u00f8mningsenhet (flow)",
@@ -139,7 +137,6 @@
         "data_description": {
           "electrical_energy_sensor": "Akkumulert energiforbruk (kWh) for varmepumpen. Avgj\u00f8rende for COP-l\u00e6ring.",
           "thermal_power_sensor": "\u00d8yeblikkelig termisk effekt (kW) fra en dedikert varmem\u00e5ler. Dette er den mest n\u00f8yaktige kilden for termisk effekt.",
-          "compressor_freq_sensor": "Kompressorfrekvens (Hz) fra Modbus-grensesnittet. Hjelper med \u00e5 oppdage drift med full kapasitet og l\u00e6re hvordan effekten faller ved lave utetemperaturer.",
           "use_flow_sensors": "Aktiver dette hvis du har en str\u00f8mningssensor og tur/retur-temperatursensorer i stedet for en dedikert varmem\u00e5ler. Systemet vil beregne termisk effekt ved hjelp av str\u00f8mning \u00d7 \u0394T.",
           "flow_rate_sensor": "Vannstr\u00f8mningssensor p\u00e5 varmepumpekretsen.",
           "flow_unit": "M\u00e5leenheten som brukes av str\u00f8mningssensoren.",
@@ -158,14 +155,62 @@
         "data_description": {
           "horizon_hours": "Hvor mange timer fremover optimalisereren planlegger. 24 timer anbefales. Utvid til 36\u201348 timer hvis morgendagens str\u00f8mpriser er tilgjengelige tidlig.",
           "lwt_step": "Temperatur\u00f8kningen mellom kandidat-turtemperaturer evaluert av l\u00f8seren. Et mindre steg er mer presist, men tar lengre tid \u00e5 beregne.",
-          "tank_standby_loss_kwh": "Estimert varmetap fra akkumulatortanken per time (kWh) p\u00e5 grunn av ufullstendig isolasjon."
+          "tank_standby_loss_kwh": "Estimert varmetap fra akkumulatortanken per time (kWh) p\u00e5 grunn av ufullstendig isolasjon.",
+          "start_penalty_kwh": "Elektrisk energiekvivalent (kWh) som legges til scenariokostnaden for hver kompressorstart. Straffer fragmenterte kj\u00f8resykluser og oppmuntrer til f\u00e6rre, lengre driftsperioder. 0,2 kWh \u2248 10 minutter ineffektiv oppstart. Sett til 0 for \u00e5 deaktivere."
+        }
+      },
+      "dhw": {
+        "title": "Varmtvann (VV)",
+        "description": "Valgfritt: la MPC planlegge varmtvannsproduksjon i de billigste timene og hindre varmepumpen fra \u00e5 produsere varmtvann i dyre timer.\n\nAktiver dette bare hvis varmepumpen din har en separat varmtvannstank og du kan styre m\u00e5ltemperaturen for varmtvann fra Home Assistant.",
+        "data": {
+          "dhw_enabled": "Aktiver VV-planlegging",
+          "dhw_temp_sensor": "Temperatursensor for varmtvannstank",
+          "dhw_tank_volume_liters": "Varmtvannstankens volum",
+          "dhw_min_temp": "Minimumstemperatur for varmtvann",
+          "dhw_target_temp": "M\u00e5ltemperatur for varmtvann",
+          "dhw_lwt": "Turtemperatur for varmtvannsmodus",
+          "dhw_daily_demand_kwh": "Daglig varmtvannsbehov"
+        },
+        "data_description": {
+          "dhw_enabled": "Aktiver planlegging av varmtvannstank og COP-kontamineringsfilter.",
+          "dhw_temp_sensor": "Sensor som rapporterer gjeldende temperatur i varmtvannstanken. Brukes til \u00e5 initialisere tankmodellen og oppdage n\u00e5r varmepumpen kj\u00f8rer i varmtvannsmodus (COP-filter).",
+          "dhw_tank_volume_liters": "Volum p\u00e5 varmtvannstanken i liter.",
+          "dhw_min_temp": "Temperatur under hvilken varmtvannstanken anses som tom og oppvarming er p\u00e5krevd. Typisk 40\u201345 \u00b0C.",
+          "dhw_target_temp": "Temperaturen varmepumpen varmer varmtvannstanken til. Typisk 55 \u00b0C.",
+          "dhw_lwt": "Fast turtemperatur som brukes n\u00e5r varmepumpen kj\u00f8rer i varmtvannsmodus. M\u00e5 v\u00e6re minst like h\u00f8y som m\u00e5ltemperaturen. Typisk 55\u201360 \u00b0C.",
+          "dhw_daily_demand_kwh": "Estimert termisk energi trukket fra varmtvannstanken per dag (kWh). Typisk husstand: 2\u20135 kWh/dag. Fordeles jevnt over 24 timer for planlegging."
+        }
+      },
+      "reconfigure_dhw": {
+        "title": "Rediger: Varmtvann (VV)",
+        "description": "Oppdater innstillinger for varmtvannstankplanlegging.",
+        "data": {
+          "dhw_enabled": "Aktiver VV-planlegging",
+          "dhw_temp_sensor": "Temperatursensor for varmtvannstank",
+          "dhw_tank_volume_liters": "Varmtvannstankens volum",
+          "dhw_min_temp": "Minimumstemperatur for varmtvann",
+          "dhw_target_temp": "M\u00e5ltemperatur for varmtvann",
+          "dhw_lwt": "Turtemperatur for varmtvannsmodus",
+          "dhw_daily_demand_kwh": "Daglig varmtvannsbehov"
+        },
+        "data_description": {
+          "dhw_enabled": "Aktiver planlegging av varmtvannstank og COP-kontamineringsfilter.",
+          "dhw_temp_sensor": "Sensor som rapporterer gjeldende temperatur i varmtvannstanken.",
+          "dhw_tank_volume_liters": "Volum p\u00e5 varmtvannstanken i liter.",
+          "dhw_min_temp": "Temperatur under hvilken varmtvannstanken anses som tom.",
+          "dhw_target_temp": "Temperaturen varmepumpen varmer varmtvannstanken til.",
+          "dhw_lwt": "Fast turtemperatur som brukes n\u00e5r varmepumpen kj\u00f8rer i varmtvannsmodus.",
+          "dhw_daily_demand_kwh": "Estimert termisk energi trukket fra varmtvannstanken per dag (kWh)."
         }
       }
     },
     "error": {
       "max_lwt_below_min": "Maksimum turtemperatur m\u00e5 v\u00e6re strengt h\u00f8yere enn minimum.",
       "max_tank_below_max_lwt": "Tankens sikkerhetsgrense m\u00e5 v\u00e6re minst like h\u00f8y som maksimal turtemperatur.",
-      "lwt_mild_above_cold": "Turtemperatur ved mildt v\u00e6r m\u00e5 v\u00e6re lavere enn turtemperatur ved kaldt v\u00e6r."
+      "lwt_mild_above_cold": "Turtemperatur ved mildt v\u00e6r m\u00e5 v\u00e6re lavere enn turtemperatur ved kaldt v\u00e6r.",
+      "min_output_above_max": "Minimum termisk effekt m\u00e5 v\u00e6re strengt lavere enn nominell full-last-effekt.",
+      "dhw_target_below_min": "VV-m\u00e5ltemperatur m\u00e5 v\u00e6re h\u00f8yere enn minimumstemperaturen.",
+      "dhw_lwt_below_target": "Turtemperatur for varmtvannsmodus m\u00e5 v\u00e6re minst like h\u00f8y som m\u00e5ltemperaturen."
     },
     "abort": {
       "already_configured": "Denne integrasjonsinstansen er allerede konfigurert."

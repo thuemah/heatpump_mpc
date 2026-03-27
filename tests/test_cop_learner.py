@@ -148,24 +148,39 @@ def test_capacity_learning():
     state = CopLearnerState()
     learner = CopLearner(state)
 
-    # Need to simulate 30 freq observations first
-    for _ in range(30):
-        obs = CopObservation(7.0, 60.0, 35.0, 4.0, 1.0, compressor_freq_hz=100.0)
-        learner.observe(obs)
-
-    assert state.freq_obs_count == 30
-    assert state.max_observed_freq_hz == 100.0
-
-    # Now send an observation at max freq, near -7
+    # Full-load observation near -7 °C anchor with ample tank headroom
     obs = CopObservation(-7.0, 60.0, 35.0, 3.9, 1.0,
-                         compressor_freq_hz=98.0, rated_kw=5.0)
+                         is_full_load=True, rated_kw=5.0, tank_headroom_kwh=10.0)
     res = learner.observe(obs)
 
     assert res.capacity_updated
     assert res.capacity_anchor_c == -7.0
-    # frac = 3.9 / 5.0 = 0.78. EMA should update it
+    # frac = 3.9 / 5.0 = 0.78
     assert res.capacity_frac_observed == 0.78
     assert state.capacity_minus7_samples == 1
+
+def test_capacity_learning_skipped_when_not_full_load():
+    state = CopLearnerState()
+    learner = CopLearner(state)
+
+    obs = CopObservation(-7.0, 60.0, 35.0, 3.9, 1.0,
+                         is_full_load=False, rated_kw=5.0)
+    res = learner.observe(obs)
+
+    assert not res.capacity_updated
+    assert state.capacity_minus7_samples == 0
+
+def test_capacity_learning_skipped_when_tank_limiting():
+    state = CopLearnerState()
+    learner = CopLearner(state)
+
+    # heat_out (3.9 kWh) >= headroom (4.0 kWh) * 0.9 → tank was limiting
+    obs = CopObservation(-7.0, 60.0, 35.0, 3.9, 1.0,
+                         is_full_load=True, rated_kw=5.0, tank_headroom_kwh=4.0)
+    res = learner.observe(obs)
+
+    assert not res.capacity_updated
+    assert state.capacity_minus7_samples == 0
 
 def test_diagnostics():
     state = CopLearnerState()

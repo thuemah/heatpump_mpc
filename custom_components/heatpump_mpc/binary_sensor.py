@@ -33,6 +33,8 @@ from .const import (
     RESULT_FEASIBLE,
     RESULT_OPTIMAL_LWT,
     RESULT_CURRENT_COP,
+    RESULT_DHW_ON_NOW,
+    RESULT_DHW_SETPOINT,
 )
 from .coordinator import HeatpumpMpcCoordinator
 
@@ -51,6 +53,7 @@ async def async_setup_entry(
         [
             PumpOnSensor(coordinator, entry),
             ScheduleFeasibleSensor(coordinator, entry),
+            DhwOnSensor(coordinator, entry),
         ]
     )
 
@@ -127,6 +130,38 @@ class PumpOnSensor(MpcBaseBinarySensor):
         return {
             "optimal_lwt": data.get(RESULT_OPTIMAL_LWT),
             "estimated_cop": data.get(RESULT_CURRENT_COP),
+        }
+
+
+class DhwOnSensor(MpcBaseBinarySensor):
+    """
+    True when the MPC solver has scheduled DHW mode for the current hour.
+
+    When True, write ``number.heat_pump_mpc_dhw_setpoint`` (= dhw_target_temp)
+    to the heat pump's DHW target to trigger reheating.
+    When False, writing the setpoint value (= dhw_min_temp − 1) to the HP
+    blocks unsolicited DHW starts during expensive hours.
+
+    The entity reports ``False`` (not unknown) when DHW scheduling is
+    disabled so automations do not need a special null-handling branch.
+    """
+
+    def __init__(
+        self, coordinator: HeatpumpMpcCoordinator, entry: ConfigEntry
+    ) -> None:
+        super().__init__(coordinator, entry, RESULT_DHW_ON_NOW, "DHW Mode On")
+        self._attr_icon = "mdi:water-boiler"
+
+    @property
+    def is_on(self) -> bool:
+        v = self._raw
+        return bool(v) if v is not None else False
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        data = self.coordinator.data or {}
+        return {
+            "recommended_dhw_setpoint": data.get(RESULT_DHW_SETPOINT),
         }
 
 

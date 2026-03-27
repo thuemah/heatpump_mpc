@@ -3,16 +3,21 @@ MPC Solver for heat pump scheduling optimisation.
 
 Pure Python. No Home Assistant dependencies.
 
-Implements a greedy two-mass Model Predictive Control algorithm:
+Implements a greedy three-mass Model Predictive Control algorithm:
   - Mass 1 (Building): per-hour heat demand supplied via a shunt valve.
-  - Mass 2 (300 L buffer tank): fast thermal battery charged by the heat pump.
+  - Mass 2 (buffer tank): fast thermal battery charged in SH mode.
+  - Mass 3 (DHW tank): domestic hot water tank, charged in DHW mode.
 
-The solver evaluates all discrete Leaving Water Temperature (LWT) candidates
-and, within each LWT scenario, selects the optimal inverter output level
-*per hour* rather than fixing a constant output across the whole horizon.
+DHW and space-heating (SH) modes are mutually exclusive: the heat pump
+runs in exactly one mode per hour.  The solver schedules DHW first (fixed
+LWT, greedy Phase 1 + 2), marks those hours as blocked, then runs the
+existing SH optimisation on remaining hours.
 
-Per-hour output selection
--------------------------
+When ``config.dhw_enabled`` is False the DHW pre-pass is skipped entirely
+and the solver behaves identically to the original two-mass algorithm.
+
+Per-hour output selection (SH)
+-------------------------------
 For each LWT candidate the solver:
 
   Phase 1 — Constraint satisfaction
@@ -43,7 +48,7 @@ import logging
 
 _LOGGER = logging.getLogger(__name__)
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _dc_replace
 
 from .heat_pump_model import HeatPumpModel
 
@@ -77,6 +82,11 @@ class HorizonPoint:
     the heating-curve-prescribed LWT for that outdoor temperature.  All solver
     and tank-simulation maths use this thermal value — electricity re-enters
     only through ``cost = thermal_kWh / COP × price``."""
+
+    dhw_demand: float = 0.0
+    """Thermal energy drawn from the DHW tank this hour (kWh_th).
+    Derived by the coordinator: daily DHW demand ÷ 24.
+    Zero when DHW scheduling is disabled."""
 
 
 @dataclass
@@ -131,6 +141,28 @@ class MpcConfig:
     Default: 0.0 (disabled).  A value of ~0.2 kWh represents roughly
     10 minutes of inefficient startup at ~1.2 kW electrical input."""
 
+    # ------------------------------------------------------------------
+    # DHW (Domestic Hot Water) parameters
+    # ------------------------------------------------------------------
+
+    dhw_enabled: bool = False
+    """When True the solver pre-schedules DHW reheating hours before running
+    the SH optimisation.  Default: False (feature disabled)."""
+
+    dhw_tank_volume_liters: float = 180.0
+    """DHW tank volume (litres). Default: 180 L."""
+
+    dhw_min_temp: float = 40.0
+    """Temperature below which the DHW tank requires reheating (°C).
+    Used as the lower bound for DHW tank energy calculations."""
+
+    dhw_target_temp: float = 55.0
+    """Target temperature to which the HP heats the DHW tank (°C)."""
+
+    dhw_lwt: float = 55.0
+    """Fixed leaving water temperature used when the HP runs in DHW mode (°C).
+    Independent of the SH LWT optimisation — DHW always runs at this temperature."""
+
 
 @dataclass
 class HourPlan:
@@ -178,6 +210,20 @@ class HourPlan:
     """True when this is the first hour of a new run cycle (off→on transition).
     The start penalty (if configured) is charged at this hour."""
 
+    dhw_on: bool = False
+    """True when the HP is scheduled to run in DHW mode this hour.
+    Mutually exclusive with ``pump_on`` (SH mode)."""
+
+    dhw_heat_delivered_kwh: float = 0.0
+    """Thermal energy delivered to the DHW tank this hour (kWh_th).
+    Non-zero only when ``dhw_on`` is True."""
+
+    dhw_tank_energy_kwh: float = 0.0
+    """Stored DHW tank energy at the end of this hour (kWh above dhw_min_temp)."""
+
+    dhw_tank_temp_c: float = 0.0
+    """Estimated DHW tank temperature at end of hour (°C)."""
+
 
 @dataclass
 class MpcResult:
@@ -200,6 +246,18 @@ class MpcResult:
     schedule: list[HourPlan] = field(default_factory=list)
     """Per-hour plan. Index 0 is the current hour."""
 
+    dhw_on_now: bool = False
+    """True when DHW mode is scheduled for the current hour (hour 0)."""
+
+    optimal_dhw_setpoint: float = 0.0
+    """Recommended DHW tank target temperature to write to the heat pump (°C).
+    Equals ``dhw_target_temp`` when ``dhw_on_now`` is True; otherwise
+    ``dhw_min_temp - 1`` to block unsolicited reheating.
+    Zero when DHW scheduling is disabled."""
+
+    dhw_planned_hours: int = 0
+    """Number of DHW-mode hours in the current horizon."""
+
 
 # ---------------------------------------------------------------------------
 # Solver
@@ -218,6 +276,140 @@ class MpcSolver:
 
     def __init__(self, model: HeatPumpModel) -> None:
         self._model = model
+
+    # ------------------------------------------------------------------
+    # DHW pre-scheduler
+    # ------------------------------------------------------------------
+
+    def _solve_dhw(
+        self,
+        horizon: list[HorizonPoint],
+        dhw_tank_temp_init: float,
+        config: MpcConfig,
+    ) -> list[bool]:
+        """
+        Schedule DHW reheating hours greedily.
+
+        DHW mode uses a fixed LWT (``config.dhw_lwt``) — no LWT sweep is
+        needed.  The algorithm mirrors the SH Phase-1 / Phase-2 structure:
+
+        Phase 1 — Constraint satisfaction
+            Schedule the cheapest hours (by DHW cost-per-kWh) that keep
+            the DHW tank from going empty throughout the horizon.
+
+        Phase 2 — Opportunistic pre-charging
+            Add cheap off-hours where the DHW tank still has headroom,
+            shifting demand to low-price windows.
+
+        Returns a boolean mask of length ``n``; True = HP runs in DHW mode
+        that hour.  These hours are *blocked* for SH scheduling.
+        """
+        n = len(horizon)
+        kwh_per_k = config.dhw_tank_volume_liters * _WATER_KWH_PER_LITRE_K
+        dhw_energy_init = max(
+            0.0, (dhw_tank_temp_init - config.dhw_min_temp) * kwh_per_k
+        )
+        dhw_max_energy = (config.dhw_target_temp - config.dhw_min_temp) * kwh_per_k
+
+        # Per-hour metrics at the fixed DHW LWT.
+        dhw_cap: list[float] = []
+        dhw_cop: list[float] = []
+        for pt in horizon:
+            cap = self._model.get_max_output_at(
+                pt.t_outdoor, config.dhw_lwt, config.heat_pump_output_kw
+            )
+            cop = max(
+                0.1,
+                self._model.get_effective_cop(pt.t_outdoor, pt.rh, config.dhw_lwt),
+            )
+            dhw_cap.append(cap)
+            dhw_cop.append(cop)
+
+        def _dhw_simulate(dhw_on: list[bool]) -> tuple[list[dict], bool]:
+            """Simulate DHW tank over the horizon.  Returns (states, feasible)."""
+            e = dhw_energy_init
+            states: list[dict] = []
+            feasible = True
+            for t in range(n):
+                tank_start = e
+                if dhw_on[t]:
+                    headroom = max(0.0, dhw_max_energy - e)
+                    heat_in = min(dhw_cap[t], headroom)
+                else:
+                    heat_in = 0.0
+                e_end = e + heat_in - horizon[t].dhw_demand
+                if e_end < 0.0:
+                    feasible = False
+                states.append({"tank_start": tank_start, "heat_in": heat_in, "tank_end": e_end})
+                e = max(0.0, e_end)
+            return states, feasible
+
+        dhw_on = [False] * n
+
+        # Phase 1 — ensure DHW tank never empties.
+        for _ in range(n):
+            _, feasible = _dhw_simulate(dhw_on)
+            if feasible:
+                break
+            # Find first violation.
+            e = dhw_energy_init
+            violation: int | None = None
+            for t in range(n):
+                if dhw_on[t]:
+                    headroom = max(0.0, dhw_max_energy - e)
+                    e += min(dhw_cap[t], headroom)
+                e -= horizon[t].dhw_demand
+                if e < 0.0:
+                    violation = t
+                    break
+                e = max(0.0, e)
+            if violation is None:
+                break
+            candidates = [t for t in range(violation + 1) if not dhw_on[t]]
+            if not candidates:
+                _LOGGER.warning(
+                    "DHW solver: cannot satisfy constraint at hour %d — "
+                    "DHW tank will be depleted.",
+                    violation,
+                )
+                break
+            cheapest = min(
+                candidates,
+                key=lambda t: horizon[t].price / dhw_cop[t],
+            )
+            dhw_on[cheapest] = True
+
+        # Phase 2 — opportunistic pre-charging in cheap off-hours.
+        #
+        # An hour is only kept when the DHW tank is *materially* below target
+        # at that point in the simulation.  The old check (heat_in > 0) was
+        # too permissive: with high daily demand relative to tank capacity the
+        # tank is continuously drained just enough to create tiny headroom, so
+        # heat_in ≈ demand for virtually every off-hour.  Accepting those hours
+        # books the pump for DHW maintenance all day and leaves no slots for
+        # space-heating scheduling.
+        #
+        # Fix: reject the hour if the DHW tank is already above half its
+        # capacity at that point (tank_start ≥ 50 % of dhw_max_energy).
+        # Using the *actual* simulation state (which includes all previously
+        # committed Phase-2 hours) means a recent Phase-2 run that refilled
+        # the tank will naturally prevent the very next hour from being added —
+        # eliminating the cascading maintenance effect.
+        half_max_energy = dhw_max_energy * 0.5
+        ranked = sorted(range(n), key=lambda t: horizon[t].price / dhw_cop[t])
+        for t in ranked:
+            if dhw_on[t]:
+                continue
+            dhw_on[t] = True
+            states, _ = _dhw_simulate(dhw_on)
+            if (states[t]["heat_in"] <= 0.0 or
+                    states[t]["tank_start"] >= half_max_energy):
+                # Tank was full, or it was above half capacity at this hour —
+                # no meaningful pre-charging benefit; revert to free the slot
+                # for space-heating scheduling.
+                dhw_on[t] = False
+
+        return dhw_on
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -263,11 +455,16 @@ class MpcSolver:
         horizon: list[HorizonPoint],
         tank_temp_init: float,
         config: MpcConfig,
+        dhw_tank_temp_init: float | None = None,
     ) -> MpcResult:
         """
         Find the cost-optimal heat pump schedule over the given horizon.
 
-        For each discrete LWT candidate the algorithm performs per-hour
+        When ``config.dhw_enabled`` is True, the DHW pre-scheduler runs
+        first to claim the cheapest hours for DHW reheating.  The remaining
+        hours are then passed to the SH optimisation as usual.
+
+        For each discrete SH LWT candidate the algorithm performs per-hour
         output selection (see module docstring).  The LWT with the lowest
         total electricity cost that satisfies all tank constraints is
         returned.  If no scenario is fully feasible the least-violated
@@ -278,9 +475,13 @@ class MpcSolver:
         horizon:
             Ordered list of :class:`HorizonPoint` objects, one per hour.
         tank_temp_init:
-            Tank temperature at the start of the first hour (°C).
+            SH buffer tank temperature at the start of the first hour (°C).
         config:
             Solver configuration.
+        dhw_tank_temp_init:
+            DHW tank temperature at the start of the horizon (°C).
+            Required when ``config.dhw_enabled`` is True; ignored otherwise.
+            Defaults to ``config.dhw_target_temp`` when omitted.
 
         Returns
         -------
@@ -297,6 +498,19 @@ class MpcSolver:
 
         kwh_per_k = _tank_kwh_per_k(config)
         tank_energy_init = max(0.0, (tank_temp_init - config.min_lwt) * kwh_per_k)
+
+        # ------------------------------------------------------------------
+        # DHW pre-scheduling pass
+        # ------------------------------------------------------------------
+        if config.dhw_enabled:
+            dhw_init = (
+                dhw_tank_temp_init
+                if dhw_tank_temp_init is not None
+                else config.dhw_target_temp
+            )
+            dhw_blocked = self._solve_dhw(horizon, dhw_init, config)
+        else:
+            dhw_blocked = [False] * len(horizon)
 
         lwt_list = _lwt_candidates(config)
 
@@ -330,7 +544,7 @@ class MpcSolver:
 
         for lwt in lwt_list:
             schedule, cost, feasible = self._solve_scenario(
-                horizon, config, tank_energy_init, lwt
+                horizon, config, tank_energy_init, lwt, dhw_blocked
             )
 
             # Prefer feasible over infeasible; among equal feasibility pick cheaper.
@@ -349,10 +563,34 @@ class MpcSolver:
                 best_feasible = feasible
                 best_lwt = lwt
 
+        # ------------------------------------------------------------------
+        # Merge DHW state into the chosen SH schedule.
+        # ------------------------------------------------------------------
+        if config.dhw_enabled and best_schedule:
+            best_schedule = self._merge_dhw_into_schedule(
+                best_schedule,
+                horizon,
+                dhw_blocked,
+                dhw_tank_temp_init if dhw_tank_temp_init is not None else config.dhw_target_temp,
+                config,
+            )
+
         # optimal_output_kw: the action for the current hour (index 0).
         optimal_output_kw = (
             best_schedule[0].output_kw if best_schedule else config.heat_pump_output_kw
         )
+
+        dhw_on_now = dhw_blocked[0] if dhw_blocked else False
+        dhw_planned_hours = sum(dhw_blocked)
+
+        if config.dhw_enabled:
+            optimal_dhw_setpoint = (
+                config.dhw_target_temp
+                if dhw_on_now
+                else config.dhw_min_temp - 1.0
+            )
+        else:
+            optimal_dhw_setpoint = 0.0
 
         return MpcResult(
             feasible=best_feasible,
@@ -360,7 +598,60 @@ class MpcSolver:
             optimal_output_kw=optimal_output_kw,
             total_cost=best_cost,
             schedule=best_schedule or [],
+            dhw_on_now=dhw_on_now,
+            optimal_dhw_setpoint=optimal_dhw_setpoint,
+            dhw_planned_hours=dhw_planned_hours,
         )
+
+    # ------------------------------------------------------------------
+    # DHW → SH schedule merger
+    # ------------------------------------------------------------------
+
+    def _merge_dhw_into_schedule(
+        self,
+        schedule: list[HourPlan],
+        horizon: list[HorizonPoint],
+        dhw_blocked: list[bool],
+        dhw_tank_temp_init: float,
+        config: MpcConfig,
+    ) -> list[HourPlan]:
+        """
+        Annotate each HourPlan with DHW state by re-simulating the DHW tank.
+
+        The SH schedule already has ``pump_on=False`` for blocked hours;
+        this pass adds ``dhw_on``, ``dhw_heat_delivered_kwh``,
+        ``dhw_tank_energy_kwh``, and ``dhw_tank_temp_c``.
+        """
+        kwh_per_k_dhw = config.dhw_tank_volume_liters * _WATER_KWH_PER_LITRE_K
+        dhw_max_energy = (config.dhw_target_temp - config.dhw_min_temp) * kwh_per_k_dhw
+        e = max(0.0, (dhw_tank_temp_init - config.dhw_min_temp) * kwh_per_k_dhw)
+
+        merged: list[HourPlan] = []
+        for plan, pt, is_dhw in zip(schedule, horizon, dhw_blocked):
+            if is_dhw:
+                cap = self._model.get_max_output_at(
+                    pt.t_outdoor, config.dhw_lwt, config.heat_pump_output_kw
+                )
+                headroom = max(0.0, dhw_max_energy - e)
+                heat_in = min(cap, headroom)
+            else:
+                heat_in = 0.0
+
+            e_end = e + heat_in - pt.dhw_demand
+            dhw_tank_t = config.dhw_min_temp + max(0.0, e_end) / kwh_per_k_dhw
+
+            merged.append(
+                _dc_replace(
+                    plan,
+                    dhw_on=is_dhw,
+                    dhw_heat_delivered_kwh=heat_in,
+                    dhw_tank_energy_kwh=e_end,
+                    dhw_tank_temp_c=dhw_tank_t,
+                )
+            )
+            e = max(0.0, e_end)
+
+        return merged
 
     # ------------------------------------------------------------------
     # Per-LWT scenario solver
@@ -372,13 +663,20 @@ class MpcSolver:
         config: MpcConfig,
         tank_energy_init: float,
         lwt: float,
+        dhw_blocked: list[bool] | None = None,
     ) -> tuple[list[HourPlan], float, bool]:
         """
         Evaluate a single LWT candidate with per-hour output selection.
 
+        ``dhw_blocked[t]`` being True means the HP is committed to DHW mode
+        that hour and cannot be used for SH — those hours are treated as
+        forced-off for SH purposes.
+
         Returns (schedule, total_cost, feasible).
         """
         n = len(horizon)
+        if dhw_blocked is None:
+            dhw_blocked = [False] * n
         max_kw = config.heat_pump_output_kw
         min_kw = config.min_output_kw
         has_modulation = min_kw < max_kw - 0.1
@@ -421,6 +719,7 @@ class MpcSolver:
         #
         # Full output charges the tank fastest, minimising the number of
         # pump-on hours required to prevent the tank from going negative.
+        # DHW-blocked hours are never eligible for SH scheduling.
         # ------------------------------------------------------------------
         pump_on = [False] * n
         for _ in range(n):
@@ -434,7 +733,10 @@ class MpcSolver:
             if earliest_violation is None:
                 break
 
-            candidates_before = [t for t in range(earliest_violation + 1) if not pump_on[t]]
+            candidates_before = [
+                t for t in range(earliest_violation + 1)
+                if not pump_on[t] and not dhw_blocked[t]
+            ]
             if not candidates_before:
                 break  # Cannot fix this violation — scenario stays infeasible.
 
@@ -472,7 +774,7 @@ class MpcSolver:
         ranked = sorted(range(n), key=lambda t: m_min[t]["cost_per_kwh_heat"])
 
         for t in ranked:
-            if pump_on[t]:
+            if pump_on[t] or dhw_blocked[t]:
                 continue
             pump_on[t] = True
             output_choice[t] = min_kw
@@ -552,15 +854,22 @@ class MpcSolver:
         pump's physical capacity.
 
         Charging is capped at the temperature the heat pump can actually deliver:
-        a pump running at ``lwt`` cannot heat a tank that is already at or above
+        a pump running at ``lwt`` cannot heat a tank that is already *above*
         that temperature (heat only flows from hot to cold).  The effective
-        charging ceiling is therefore ``min(max_tank_temp, lwt)``, and headroom
-        is computed against this ceiling rather than the unconditional
-        ``max_tank_temp``.
+        charging ceiling is therefore ``min(max_tank_temp, lwt)``.
 
         The tank may *start* above ``lwt`` (carried over from a previous run at
-        a higher setpoint) — in that case headroom is zero and the pump delivers
-        nothing until demand drains the tank below the charging ceiling.
+        a higher setpoint) — in that case heat_in is zero for the whole hour
+        and the pump delivers nothing until demand drains the tank below lwt.
+
+        When the tank is *at* (or below) the LWT ceiling the pump can deliver
+        heat continuously even if the tank starts the hour right at the ceiling,
+        because demand and standby losses drain the tank during the hour.  The
+        effective headroom is therefore ``raw_headroom + house_demand + standby``.
+        This is essential for low-mass / direct-coupled systems (e.g. fan coils
+        with a ~50 L buffer) where the tiny tank would otherwise saturate within
+        minutes at full output, leaving headroom = 0 and blocking all subsequent
+        charging.
 
         ``tank_end`` may be negative — indicating a constraint violation —
         but the carry-forward value is clamped to zero so subsequent hours
@@ -599,10 +908,24 @@ class MpcSolver:
             if pump_on[t]:
                 # Per-hour deliverable output (already clamped to physical capacity).
                 deliverable = metrics[t]["effective_output_kw"]
-                # Headroom against the LWT-limited charging ceiling.
-                # Zero when tank is already at or above lwt (pump cannot add heat).
-                headroom = max(0.0, max_charge_energy - tank)
-                heat_in = min(deliverable, headroom)
+                # Raw headroom: negative when tank temperature exceeds the LWT
+                # ceiling (pump water is cooler than tank; heat cannot flow uphill).
+                raw_headroom = max_charge_energy - tank
+                if raw_headroom >= 0.0:
+                    # Tank is at or below the LWT ceiling.  During this 1-hour
+                    # slot, demand and standby losses continuously drain the tank,
+                    # creating room for the pump to deliver heat even when the tank
+                    # starts the hour right at the ceiling.  This is especially
+                    # critical for low-mass / direct-coupled systems (e.g. fan coils
+                    # with a small buffer) where the tank saturates within minutes at
+                    # full output: without accounting for demand drain, headroom stays
+                    # zero for the rest of the horizon and the pump never runs again.
+                    effective_headroom = raw_headroom + pt.house_demand + config.tank_standby_loss_kwh
+                    heat_in = min(deliverable, effective_headroom)
+                else:
+                    # Tank is above the LWT ceiling — the pump delivers cooler water
+                    # than the tank already holds; no heat transfer is possible.
+                    heat_in = 0.0
             else:
                 heat_in = 0.0
 

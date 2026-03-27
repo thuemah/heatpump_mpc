@@ -90,12 +90,34 @@ CONF_RETURN_TEMP_SENSOR = "return_temp_sensor"
 CONF_FLOW_UNIT = "flow_unit"
 """Unit of the flow rate sensor: 'L/min' or 'm³/h'."""
 
-CONF_COMPRESSOR_FREQ_SENSOR = "compressor_freq_sensor"
-"""Sensor reporting current compressor frequency (Hz) from the Modbus interface.
-Used to detect full-capacity operation and learn the capacity derating curve."""
-
 FLOW_UNIT_LMIN = "L/min"
 FLOW_UNIT_M3H = "m³/h"
+
+# DHW (Domestic Hot Water) — all optional; feature disabled when dhw_enabled is False.
+CONF_DHW_ENABLED = "dhw_enabled"
+"""True when the DHW scheduling and COP-filter features are active."""
+
+CONF_DHW_TEMP_SENSOR = "dhw_temp_sensor"
+"""Sensor reporting current DHW tank temperature (°C).
+Used for the COP-contamination filter and to initialise the DHW tank model."""
+
+CONF_DHW_TANK_VOLUME_L = "dhw_tank_volume_liters"
+"""DHW tank volume (litres). Default: 180 L."""
+
+CONF_DHW_MIN_TEMP = "dhw_min_temp"
+"""Temperature below which the DHW tank is considered depleted and reheating
+is required (°C). Default: 40 °C."""
+
+CONF_DHW_TARGET_TEMP = "dhw_target_temp"
+"""Target temperature the HP heats the DHW tank to (°C). Default: 55 °C."""
+
+CONF_DHW_LWT = "dhw_lwt"
+"""Fixed leaving water temperature used during DHW mode (°C). Must be ≥
+dhw_target_temp. Default: 55 °C."""
+
+CONF_DHW_DAILY_DEMAND_KWH = "dhw_daily_demand_kwh"
+"""Estimated total thermal energy drawn from the DHW tank per day (kWh_th).
+Distributed uniformly over 24 h for horizon planning. Default: 3.5 kWh."""
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -120,6 +142,14 @@ DEFAULT_TANK_TEMP = 40.0        # °C  — fallback when sensor is unavailable
 DEFAULT_RH = 75.0               # %   — fallback when weather entity has no humidity
 DEFAULT_FLOW_UNIT = FLOW_UNIT_LMIN
 DEFAULT_UNIFORM_PRICE = 1.0     # dimensionless — used when no price sensor is configured
+
+# DHW defaults
+DEFAULT_DHW_TANK_VOLUME_L = 180.0     # litres
+DEFAULT_DHW_MIN_TEMP = 40.0           # °C — below this the DHW tank needs reheating
+DEFAULT_DHW_TARGET_TEMP = 55.0        # °C — HP heats DHW tank to this temperature
+DEFAULT_DHW_LWT = 55.0                # °C — fixed LWT during DHW mode
+DEFAULT_DHW_DAILY_DEMAND_KWH = 3.5    # kWh_th per day
+DEFAULT_DHW_TANK_TEMP = 50.0          # °C — fallback when DHW sensor is unavailable
 
 # Heating curve reference outdoor temperatures (fixed, not user-configurable)
 HEATING_CURVE_T_COLD: float = -10.0   # °C — design cold point
@@ -179,3 +209,13 @@ RESULT_PLANNED_KWH_THERMAL = "planned_kwh_thermal"
 RESULT_PLANNED_KWH_ELECTRICAL = "planned_kwh_electrical"
 """Estimated total electrical consumption over the horizon (kWh_el),
 excluding start penalties."""
+
+RESULT_DHW_ON_NOW = "dhw_on_now"
+"""True when the DHW tank should be reheated in the current hour."""
+
+RESULT_DHW_SETPOINT = "dhw_setpoint"
+"""Recommended DHW tank target temperature (°C) to write to the heat pump.
+Equal to dhw_target_temp when DHW is scheduled; dhw_min_temp - 1 otherwise."""
+
+RESULT_DHW_PLANNED_HOURS = "dhw_planned_hours"
+"""Number of DHW-mode hours scheduled in the current horizon."""

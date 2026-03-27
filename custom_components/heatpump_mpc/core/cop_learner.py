@@ -101,14 +101,6 @@ DEFAULT_CAPACITY_LEARNING_RATE: float = 0.03
 MIN_RELIABLE_SAMPLES: int = 20
 MIN_RELIABLE_CAPACITY_SAMPLES: int = 5
 
-# Compressor must report at least this many frequency observations before we
-# trust that max_observed_freq_hz has converged to the true maximum.
-_MIN_FREQ_OBS_FOR_CAPACITY: int = 30
-
-# Fraction of max observed frequency above which we consider the compressor
-# to be at its capacity limit for the current outdoor conditions.
-_AT_MAX_FREQ_RATIO: float = 0.95
-
 # Temperature anchors where capacity fractions are learned (°C).
 # The 7 °C anchor is the EN 14511 rating point and is always 1.00 — no need to learn.
 _CAPACITY_ANCHORS: tuple[float, ...] = (-15.0, -7.0)
@@ -179,15 +171,20 @@ class CopObservation:
     duration_hours: float = 1.0
     """Length of the observation window (hours).  Used as a quality guard."""
 
-    compressor_freq_hz: Optional[float] = None
-    """Mean compressor frequency during the cycle (Hz), if available from
-    the Modbus interface.  Used to detect full-capacity operation and learn
-    the capacity derating curve.  None disables capacity learning."""
+    is_full_load: bool = False
+    """True when the MPC commanded full output (``heat_pump_output_kw``) during
+    this observation window.  Used as the gate for capacity learning: only
+    full-load observations reflect the pump's actual capacity ceiling."""
 
     rated_kw: Optional[float] = None
     """Rated full-load thermal output (kW) from the user's configuration.
-    Required when ``compressor_freq_hz`` is provided so the learner can
-    compute the observed capacity fraction = heat_kw / rated_kw."""
+    Required when ``is_full_load`` is True so the learner can compute the
+    observed capacity fraction = actual_kw / rated_kw."""
+
+    tank_headroom_kwh: Optional[float] = None
+    """Available tank headroom at the start of the observation window (kWh).
+    When provided, observations where headroom ≤ heat delivered are filtered
+    out: the tank was the limiting factor, not the pump's capacity."""
 
 
 @dataclass
@@ -232,18 +229,10 @@ class CopLearnerState:
     """Learned capacity fraction at −7 °C outdoor.  Same as above."""
 
     capacity_minus15_samples: int = 0
-    """Max-frequency observations that updated the −15 °C anchor."""
+    """Full-load observations that updated the −15 °C anchor."""
 
     capacity_minus7_samples: int = 0
-    """Max-frequency observations that updated the −7 °C anchor."""
-
-    max_observed_freq_hz: float = 0.0
-    """Rolling maximum compressor frequency ever seen (Hz).
-    Used as a self-calibrating reference for "at maximum" detection."""
-
-    freq_obs_count: int = 0
-    """Total number of observations that included a compressor frequency.
-    Capacity learning only activates after this exceeds the minimum threshold."""
+    """Full-load observations that updated the −7 °C anchor."""
 
     def to_dict(self) -> dict:
         """Serialise to a JSON-safe dict for HA storage."""
@@ -561,8 +550,6 @@ class CopLearner:
             "capacity_minus7_samples": self.state.capacity_minus7_samples,
             "capacity_minus15_reliable": self.is_capacity_reliable_at(-15.0),
             "capacity_minus7_reliable": self.is_capacity_reliable_at(-7.0),
-            "max_observed_freq_hz": round(self.state.max_observed_freq_hz, 1),
-            "freq_obs_count": self.state.freq_obs_count,
             # Spot-check COP prediction at representative operating points
             "cop_predicted_a7w35": round(
                 self.predict_cop(t_outdoor=7.0, rh=60.0, lwt=35.0), 2
@@ -584,11 +571,13 @@ class CopLearner:
         obs: CopObservation,
     ) -> tuple[bool, Optional[float], Optional[float]]:
         """
-        Update compressor frequency tracking and, when conditions are met,
-        update the capacity fraction for the nearest temperature anchor.
+        Update the capacity fraction for the nearest temperature anchor when
+        the observation was made at full inverter output.
 
-        This is called for *every* observation (including those later rejected
-        for COP learning) so that the frequency baseline builds up quickly.
+        The MPC's own output decision (``is_full_load``) replaces compressor
+        frequency as the "at-capacity" gate.  An additional tank-headroom
+        filter prevents updating when the tank — not the pump — was the
+        limiting factor.
 
         Returns
         -------
@@ -597,40 +586,26 @@ class CopLearner:
             *anchor_c*: The anchor temperature that was updated (°C), or None.
             *frac_observed*: The observed capacity fraction, or None.
         """
-        if obs.compressor_freq_hz is None:
+        if not obs.is_full_load:
             return False, None, None
 
-        freq = obs.compressor_freq_hz
+        # Tank-headroom filter: if the tank could not absorb more heat than
+        # was delivered, the tank (not the pump) was the bottleneck.
+        if obs.tank_headroom_kwh is not None:
+            if obs.heat_out_kwh >= obs.tank_headroom_kwh * 0.9:
+                return False, None, None
 
-        # Update rolling maximum and observation count
-        if freq > self.state.max_observed_freq_hz:
-            self.state.max_observed_freq_hz = freq
-        self.state.freq_obs_count += 1
-
-        # Don't start capacity learning until the frequency baseline has settled
-        if self.state.freq_obs_count < _MIN_FREQ_OBS_FOR_CAPACITY:
-            return False, None, None
-
-        # Is the compressor at (or very near) its maximum?
-        if self.state.max_observed_freq_hz <= 0.0:
-            return False, None, None
-        ratio = freq / self.state.max_observed_freq_hz
-        if ratio < _AT_MAX_FREQ_RATIO:
-            return False, None, None
-
-        # Need rated_kw to compute a capacity fraction
         if not obs.rated_kw or obs.rated_kw <= 0.0:
             return False, None, None
 
-        # Compute actual thermal power during this observation
         if obs.duration_hours <= 0.0:
             return False, None, None
+
         actual_kw = obs.heat_out_kwh / obs.duration_hours
 
         # Observed fraction must be physically plausible
         frac_observed = actual_kw / obs.rated_kw
         if frac_observed <= 0.05 or frac_observed > 1.2:
-            # < 5 % looks like a standby reading; > 120 % is a sensor error
             return False, None, None
 
         # Find the nearest temperature anchor within the bin radius
