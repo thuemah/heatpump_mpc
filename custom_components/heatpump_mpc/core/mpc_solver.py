@@ -1,0 +1,664 @@
+"""
+MPC Solver for heat pump scheduling optimisation.
+
+Pure Python. No Home Assistant dependencies.
+
+Implements a greedy two-mass Model Predictive Control algorithm:
+  - Mass 1 (Building): per-hour heat demand supplied via a shunt valve.
+  - Mass 2 (300 L buffer tank): fast thermal battery charged by the heat pump.
+
+The solver evaluates all discrete Leaving Water Temperature (LWT) candidates
+and, within each LWT scenario, selects the optimal inverter output level
+*per hour* rather than fixing a constant output across the whole horizon.
+
+Per-hour output selection
+-------------------------
+For each LWT candidate the solver:
+
+  Phase 1 — Constraint satisfaction
+    Uses full rated output (``heat_pump_output_kw``) to schedule the
+    minimum set of hours that keep the tank above empty.  High output
+    fills the tank quickly, which minimises the number of pump-on hours
+    needed to satisfy hard constraints.
+
+  Post-Phase-1 downgrade
+    Each Phase-1 pump-on hour is tentatively downgraded to
+    ``min_output_kw`` (which delivers heat at a better COP due to
+    inverter modulation gain).  The downgrade is kept if it is still
+    feasible; otherwise reverted to full output.
+
+  Phase 2 — Opportunistic pre-charging
+    Remaining off-hours are considered for pre-charging, cheapest COP
+    first, using ``min_output_kw``.  An hour is added only if the tank
+    has actual headroom at that point in the simulation (``heat_in > 0``).
+    Because Phase 1 typically fills the tank quickly using full output,
+    the tank is often near capacity in Phase 2, causing most candidate
+    hours to be rejected — producing the natural on/off pattern that
+    correctly concentrates run-time in high-COP windows.
+"""
+
+from __future__ import annotations
+
+import logging
+
+_LOGGER = logging.getLogger(__name__)
+
+from dataclasses import dataclass, field
+
+from .heat_pump_model import HeatPumpModel
+
+# Water heat capacity: 1.16 Wh per litre per Kelvin → 0.00116 kWh/L/K
+_WATER_KWH_PER_LITRE_K: float = 1.16e-3
+
+
+# ---------------------------------------------------------------------------
+# Public data structures
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class HorizonPoint:
+    """Input data for a single one-hour slot in the optimisation horizon."""
+
+    price: float
+    """Electricity price for this hour (currency / kWh)."""
+
+    t_outdoor: float
+    """Outdoor temperature (°C)."""
+
+    rh: float
+    """Relative humidity (%)."""
+
+    house_demand: float
+    """Thermal energy the building needs this hour to stay in the comfort band (kWh_th).
+
+    Derived by the coordinator: Heating Analytics provides electrical kWh; the
+    coordinator converts to thermal kWh by multiplying by the COP estimated at
+    the heating-curve-prescribed LWT for that outdoor temperature.  All solver
+    and tank-simulation maths use this thermal value — electricity re-enters
+    only through ``cost = thermal_kWh / COP × price``."""
+
+
+@dataclass
+class MpcConfig:
+    """Configuration parameters for the MPC solver."""
+
+    min_lwt: float
+    """Absolute minimum leaving water temperature (°C). Never violated."""
+
+    max_lwt: float
+    """Maximum leaving water temperature the heat pump may target (°C)."""
+
+    max_tank_temp: float
+    """Safety ceiling for the buffer tank (°C). Charging stops when reached."""
+
+    heat_pump_output_kw: float
+    """Nominal thermal output of the heat pump (kW).
+    Over a 1-hour time step this equals the kWh delivered per run hour."""
+
+    tank_volume_liters: float = 300.0
+    """Volume of the buffer tank (litres). Default: 300 L."""
+
+    lwt_step: float = 5.0
+    """Increment between consecutive LWT candidates (°C). Default: 5 °C."""
+
+    tank_standby_loss_kwh: float = 0.05
+    """Hourly standing heat loss from the insulated tank (kWh). Default: 0.05 kWh."""
+
+    min_output_kw: float = 4.37
+    """Minimum inverter output (kW). Used as the output level for pre-charging
+    (Phase 2) and as the downgrade target after Phase 1. Delivers heat at a
+    better COP than full output due to inverter modulation gain.
+    Default: 4.37 kW (Sprsun R290 datasheet minimum)."""
+
+    k_emission: float = 0.0
+    """Thermal transfer coefficient of the building's emission system (kW per K
+    above t_room).  Heat transferred to the building each hour:
+        Q_thermal = k_emission × (LWT − t_room)     [kWh_th / h]
+    When zero (default) the emission constraint is disabled — no LWT filtering.
+    Computed by the coordinator from the heating curve config and Heating
+    Analytics demand data; purely thermal, independent of COP or electricity."""
+
+    t_room: float = 21.0
+    """Indoor comfort temperature (°C).  Used together with k_emission to
+    compute the minimum LWT required to cover the building's hourly thermal
+    demand via the emission system."""
+
+    start_penalty_kwh: float = 0.0
+    """Electrical energy (kWh_el) added to scenario cost for each compressor
+    start event (transition from off → on).  Penalises fragmented schedules
+    with many short cycles and favours fewer, longer run periods.
+    Default: 0.0 (disabled).  A value of ~0.2 kWh represents roughly
+    10 minutes of inefficient startup at ~1.2 kW electrical input."""
+
+
+@dataclass
+class HourPlan:
+    """Scheduled action and simulated state for a single hour."""
+
+    hour_index: int
+    """Zero-based index within the horizon."""
+
+    pump_on: bool
+    """True if the heat pump is scheduled to run this hour."""
+
+    lwt: float
+    """Leaving water temperature setpoint for this hour (°C)."""
+
+    output_kw: float
+    """Effective thermal output for this hour (kW).
+    May be ``min_output_kw`` or ``heat_pump_output_kw`` depending on which
+    the per-hour optimiser selected, clamped to the physical capacity ceiling."""
+
+    max_capacity_kw: float
+    """Physical capacity ceiling at this hour's conditions (kW).
+    The pump cannot exceed this regardless of the inverter setting."""
+
+    cop_effective: float
+    """Estimated effective COP (including defrost penalty) at this hour."""
+
+    cost_per_kwh_heat: float
+    """Decision metric: electricity price divided by effective COP."""
+
+    heat_delivered_kwh: float
+    """Thermal energy actually delivered to the tank this hour (kWh).
+    May be less than the nominal output when the tank approaches max_tank_temp."""
+
+    tank_energy_kwh: float
+    """Stored tank energy at the *end* of this hour (kWh above min_lwt).
+    Negative values indicate a constraint violation in an infeasible scenario."""
+
+    tank_temp_c: float
+    """Estimated tank temperature at end of hour (°C)."""
+
+    electricity_cost: float
+    """Electricity cost for this hour (currency), including any start penalty."""
+
+    start_event: bool = False
+    """True when this is the first hour of a new run cycle (off→on transition).
+    The start penalty (if configured) is charged at this hour."""
+
+
+@dataclass
+class MpcResult:
+    """Result returned by :py:meth:`MpcSolver.solve`."""
+
+    feasible: bool
+    """True when all tank constraints are satisfied throughout the horizon."""
+
+    optimal_lwt: float
+    """The LWT setpoint for the chosen scenario (°C)."""
+
+    optimal_output_kw: float
+    """The inverter output level chosen for the *current* hour (hour 0) of the
+    optimal scenario (kW).  Subsequent hours may use a different output level;
+    consult ``schedule[t].output_kw`` for the full per-hour plan."""
+
+    total_cost: float
+    """Total electricity cost over the horizon for the chosen scenario (currency)."""
+
+    schedule: list[HourPlan] = field(default_factory=list)
+    """Per-hour plan. Index 0 is the current hour."""
+
+
+# ---------------------------------------------------------------------------
+# Solver
+# ---------------------------------------------------------------------------
+
+
+class MpcSolver:
+    """
+    Greedy two-mass MPC solver for heat pump + buffer tank scheduling.
+
+    Parameters
+    ----------
+    model:
+        A configured :class:`HeatPumpModel` instance used for COP estimation.
+    """
+
+    def __init__(self, model: HeatPumpModel) -> None:
+        self._model = model
+
+    # ------------------------------------------------------------------
+    # Public helpers
+    # ------------------------------------------------------------------
+
+    def cost_per_kwh_heat(
+        self,
+        price: float,
+        t_outdoor: float,
+        rh: float,
+        lwt: float,
+    ) -> float:
+        """
+        Return the cost of delivering 1 kWh of heat at given conditions.
+
+        This is the central decision metric used to rank hours.
+
+        Parameters
+        ----------
+        price:
+            Electricity price (currency / kWh).
+        t_outdoor:
+            Outdoor temperature (°C).
+        rh:
+            Relative humidity (%).
+        lwt:
+            Leaving water temperature setpoint (°C).
+
+        Returns
+        -------
+        float
+            Cost per kWh of delivered thermal energy (currency / kWh_th).
+        """
+        cop = max(self._model.get_effective_cop(t_outdoor, rh, lwt), 0.1)
+        return price / cop
+
+    # ------------------------------------------------------------------
+    # Core optimisation entry point
+    # ------------------------------------------------------------------
+
+    def solve(
+        self,
+        horizon: list[HorizonPoint],
+        tank_temp_init: float,
+        config: MpcConfig,
+    ) -> MpcResult:
+        """
+        Find the cost-optimal heat pump schedule over the given horizon.
+
+        For each discrete LWT candidate the algorithm performs per-hour
+        output selection (see module docstring).  The LWT with the lowest
+        total electricity cost that satisfies all tank constraints is
+        returned.  If no scenario is fully feasible the least-violated
+        one is returned with ``feasible=False``.
+
+        Parameters
+        ----------
+        horizon:
+            Ordered list of :class:`HorizonPoint` objects, one per hour.
+        tank_temp_init:
+            Tank temperature at the start of the first hour (°C).
+        config:
+            Solver configuration.
+
+        Returns
+        -------
+        MpcResult
+            The optimal (or best-effort) schedule and associated metadata.
+
+        Raises
+        ------
+        ValueError
+            If *horizon* is empty.
+        """
+        if not horizon:
+            raise ValueError("horizon must contain at least one HorizonPoint.")
+
+        kwh_per_k = _tank_kwh_per_k(config)
+        tank_energy_init = max(0.0, (tank_temp_init - config.min_lwt) * kwh_per_k)
+
+        lwt_list = _lwt_candidates(config)
+
+        # Emission constraint: filter out LWT candidates that cannot transfer
+        # the peak hourly thermal demand to the building.
+        #
+        # Physical model (pure thermal — no electrical energy involved):
+        #   Q_thermal = k_emission × (LWT − t_room)   [kWh_th / h]
+        # → LWT_min = t_room + peak_demand / k_emission
+        #
+        # k_emission is zero when no heating curve config is available;
+        # in that case we skip the filter and fall back to tank-energy
+        # feasibility only.
+        if config.k_emission > 1e-6:
+            peak_demand_kwh = max(h.house_demand for h in horizon)
+            min_emission_lwt = config.t_room + peak_demand_kwh / config.k_emission
+            filtered = [l for l in lwt_list if l >= min_emission_lwt - 1e-6]
+            if filtered:
+                lwt_list = filtered
+            else:
+                _LOGGER.warning(
+                    "No LWT candidate satisfies emission constraint "
+                    "(min required %.1f °C); evaluating all candidates.",
+                    min_emission_lwt,
+                )
+
+        best_schedule: list[HourPlan] | None = None
+        best_cost = float("inf")
+        best_feasible = False
+        best_lwt = lwt_list[0]
+
+        for lwt in lwt_list:
+            schedule, cost, feasible = self._solve_scenario(
+                horizon, config, tank_energy_init, lwt
+            )
+
+            # Prefer feasible over infeasible; among equal feasibility pick cheaper.
+            if best_schedule is None:
+                accept = True
+            elif feasible and not best_feasible:
+                accept = True
+            elif feasible == best_feasible and cost < best_cost:
+                accept = True
+            else:
+                accept = False
+
+            if accept:
+                best_schedule = schedule
+                best_cost = cost
+                best_feasible = feasible
+                best_lwt = lwt
+
+        # optimal_output_kw: the action for the current hour (index 0).
+        optimal_output_kw = (
+            best_schedule[0].output_kw if best_schedule else config.heat_pump_output_kw
+        )
+
+        return MpcResult(
+            feasible=best_feasible,
+            optimal_lwt=best_lwt,
+            optimal_output_kw=optimal_output_kw,
+            total_cost=best_cost,
+            schedule=best_schedule or [],
+        )
+
+    # ------------------------------------------------------------------
+    # Per-LWT scenario solver
+    # ------------------------------------------------------------------
+
+    def _solve_scenario(
+        self,
+        horizon: list[HorizonPoint],
+        config: MpcConfig,
+        tank_energy_init: float,
+        lwt: float,
+    ) -> tuple[list[HourPlan], float, bool]:
+        """
+        Evaluate a single LWT candidate with per-hour output selection.
+
+        Returns (schedule, total_cost, feasible).
+        """
+        n = len(horizon)
+        max_kw = config.heat_pump_output_kw
+        min_kw = config.min_output_kw
+        has_modulation = min_kw < max_kw - 0.1
+
+        # ------------------------------------------------------------------
+        # Build per-hour metrics for both output levels.
+        # ------------------------------------------------------------------
+        def _build_metrics(out_kw: float) -> list[dict]:
+            result = []
+            for pt in horizon:
+                max_cap = self._model.get_max_output_at(pt.t_outdoor, lwt, max_kw)
+                eff = min(out_kw, max_cap)
+                cop = max(
+                    self._model.get_cop_at_output(
+                        pt.t_outdoor, pt.rh, lwt, eff, max_kw, min_kw
+                    ),
+                    0.1,
+                )
+                result.append(
+                    {
+                        "cop": cop,
+                        "cost_per_kwh_heat": pt.price / cop,
+                        "max_capacity_kw": max_cap,
+                        "effective_output_kw": eff,
+                    }
+                )
+            return result
+
+        m_max = _build_metrics(max_kw)
+        m_min = _build_metrics(min_kw) if has_modulation else m_max
+
+        # Per-hour output choice: initialise to max (used in Phase 1).
+        output_choice = [max_kw] * n  # max_kw or min_kw per hour
+
+        def _active_metrics() -> list[dict]:
+            return [m_min[t] if output_choice[t] == min_kw else m_max[t] for t in range(n)]
+
+        # ------------------------------------------------------------------
+        # Phase 1 — Constraint satisfaction using full output.
+        #
+        # Full output charges the tank fastest, minimising the number of
+        # pump-on hours required to prevent the tank from going negative.
+        # ------------------------------------------------------------------
+        pump_on = [False] * n
+        for _ in range(n):
+            states, feasible = self._simulate(horizon, m_max, pump_on, config, tank_energy_init, lwt)
+            if feasible:
+                break
+
+            earliest_violation = next(
+                (t for t, s in enumerate(states) if s["tank_end"] < 0.0), None
+            )
+            if earliest_violation is None:
+                break
+
+            candidates_before = [t for t in range(earliest_violation + 1) if not pump_on[t]]
+            if not candidates_before:
+                break  # Cannot fix this violation — scenario stays infeasible.
+
+            cheapest = min(candidates_before, key=lambda t: m_max[t]["cost_per_kwh_heat"])
+            pump_on[cheapest] = True
+
+        # ------------------------------------------------------------------
+        # Post-Phase-1 downgrade
+        #
+        # Try to switch each Phase-1 pump-on hour from full output to
+        # min output.  Min output has a better COP (modulation gain) so
+        # the same heat costs less electricity.  Revert if the lower
+        # output makes the schedule infeasible.
+        # ------------------------------------------------------------------
+        if has_modulation:
+            for t in range(n):
+                if not pump_on[t]:
+                    continue
+                output_choice[t] = min_kw
+                _, still_ok = self._simulate(
+                    horizon, _active_metrics(), pump_on, config, tank_energy_init, lwt
+                )
+                if not still_ok:
+                    output_choice[t] = max_kw  # revert
+
+        # ------------------------------------------------------------------
+        # Phase 2 — Opportunistic pre-charging at min output.
+        #
+        # Consider off-hours for pre-charging, ranked cheapest COP first.
+        # Because Phase 1 typically uses full output and fills the tank
+        # quickly, most additional hours are rejected here (heat_in == 0
+        # when the tank is full), naturally concentrating runtime in
+        # high-COP windows.
+        # ------------------------------------------------------------------
+        ranked = sorted(range(n), key=lambda t: m_min[t]["cost_per_kwh_heat"])
+
+        for t in ranked:
+            if pump_on[t]:
+                continue
+            pump_on[t] = True
+            output_choice[t] = min_kw
+            trial, _ = self._simulate(
+                horizon, _active_metrics(), pump_on, config, tank_energy_init, lwt
+            )
+            if trial[t]["heat_in"] <= 0.0:
+                # Tank was full at this hour — no heat delivered; revert.
+                pump_on[t] = False
+                output_choice[t] = max_kw
+
+        # ------------------------------------------------------------------
+        # Final authoritative simulation and schedule assembly.
+        # ------------------------------------------------------------------
+        final_metrics = _active_metrics()
+        states, feasible = self._simulate(
+            horizon, final_metrics, pump_on, config, tank_energy_init, lwt
+        )
+
+        kwh_per_k = _tank_kwh_per_k(config)
+        total_cost = 0.0
+        schedule: list[HourPlan] = []
+
+        for t, (pt, s, m) in enumerate(zip(horizon, states, final_metrics)):
+            heat_in = s["heat_in"]
+            # Electrical cost for delivered heat (thermal kWh / COP × price).
+            elec_cost = (heat_in / m["cop"]) * pt.price
+
+            # Start penalty: charged once per off→on transition.
+            # The penalty is in electrical kWh (compressor startup loss) × price.
+            is_start = pump_on[t] and (t == 0 or not pump_on[t - 1])
+            if is_start and config.start_penalty_kwh > 0.0:
+                elec_cost += config.start_penalty_kwh * pt.price
+
+            total_cost += elec_cost
+
+            tank_end = s["tank_end"]
+            tank_t = config.min_lwt + max(0.0, tank_end) / kwh_per_k
+
+            schedule.append(
+                HourPlan(
+                    hour_index=t,
+                    pump_on=pump_on[t],
+                    lwt=lwt,
+                    output_kw=m["effective_output_kw"],
+                    max_capacity_kw=m["max_capacity_kw"],
+                    cop_effective=m["cop"],
+                    cost_per_kwh_heat=m["cost_per_kwh_heat"],
+                    heat_delivered_kwh=heat_in,
+                    tank_energy_kwh=tank_end,
+                    tank_temp_c=tank_t,
+                    electricity_cost=elec_cost,
+                    start_event=is_start,
+                )
+            )
+
+        return schedule, total_cost, feasible
+
+    # ------------------------------------------------------------------
+    # Tank physics simulation
+    # ------------------------------------------------------------------
+
+    def _simulate(
+        self,
+        horizon: list[HorizonPoint],
+        metrics: list[dict],
+        pump_on: list[bool],
+        config: MpcConfig,
+        tank_energy_init: float,
+        lwt: float | None = None,
+    ) -> tuple[list[dict], bool]:
+        """
+        Simulate tank energy over the horizon for a given pump schedule.
+
+        Heat delivered per run hour is taken from ``metrics[t]["effective_output_kw"]``,
+        which reflects the per-hour output choice and is already clamped to the
+        pump's physical capacity.
+
+        Charging is capped at the temperature the heat pump can actually deliver:
+        a pump running at ``lwt`` cannot heat a tank that is already at or above
+        that temperature (heat only flows from hot to cold).  The effective
+        charging ceiling is therefore ``min(max_tank_temp, lwt)``, and headroom
+        is computed against this ceiling rather than the unconditional
+        ``max_tank_temp``.
+
+        The tank may *start* above ``lwt`` (carried over from a previous run at
+        a higher setpoint) — in that case headroom is zero and the pump delivers
+        nothing until demand drains the tank below the charging ceiling.
+
+        ``tank_end`` may be negative — indicating a constraint violation —
+        but the carry-forward value is clamped to zero so subsequent hours
+        are not unfairly penalised.
+
+        Parameters
+        ----------
+        lwt:
+            Leaving water temperature for this scenario (°C).  Defaults to
+            ``config.max_tank_temp`` when omitted (backward-compatible with tests
+            that call this method directly without specifying an LWT).
+
+        Returns
+        -------
+        (states, feasible)
+            *states*: list of per-hour dicts with keys
+            ``tank_start``, ``heat_in``, ``tank_end``.
+            *feasible*: False if any ``tank_end`` is negative.
+        """
+        kwh_per_k = _tank_kwh_per_k(config)
+        # Maximum energy the tank can hold at the given LWT.
+        # If lwt < max_tank_temp the pump cannot charge the tank above lwt, so
+        # the effective ceiling is min(max_tank_temp, lwt).
+        effective_lwt = lwt if lwt is not None else config.max_tank_temp
+        max_charge_energy = max(
+            0.0,
+            kwh_per_k * (min(config.max_tank_temp, effective_lwt) - config.min_lwt),
+        )
+        tank = tank_energy_init
+        feasible = True
+        states: list[dict] = []
+
+        for t, pt in enumerate(horizon):
+            tank_start = tank
+
+            if pump_on[t]:
+                # Per-hour deliverable output (already clamped to physical capacity).
+                deliverable = metrics[t]["effective_output_kw"]
+                # Headroom against the LWT-limited charging ceiling.
+                # Zero when tank is already at or above lwt (pump cannot add heat).
+                headroom = max(0.0, max_charge_energy - tank)
+                heat_in = min(deliverable, headroom)
+            else:
+                heat_in = 0.0
+
+            tank_end = tank + heat_in - pt.house_demand - config.tank_standby_loss_kwh
+
+            if tank_end < 0.0:
+                feasible = False
+
+            states.append(
+                {
+                    "tank_start": tank_start,
+                    "heat_in": heat_in,
+                    "tank_end": tank_end,
+                }
+            )
+
+            # Clamp to zero so a single deficit does not cascade into all future hours.
+            tank = max(0.0, tank_end)
+
+        return states, feasible
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers (pure functions, no state)
+# ---------------------------------------------------------------------------
+
+
+def _tank_kwh_per_k(config: MpcConfig) -> float:
+    """Thermal capacity of the buffer tank (kWh per Kelvin)."""
+    return config.tank_volume_liters * _WATER_KWH_PER_LITRE_K
+
+
+def _max_tank_energy(config: MpcConfig) -> float:
+    """Maximum storable energy in the tank above min_lwt (kWh)."""
+    return _tank_kwh_per_k(config) * (config.max_tank_temp - config.min_lwt)
+
+
+def _lwt_candidates(config: MpcConfig) -> list[float]:
+    """Generate the discrete LWT candidates to evaluate."""
+    candidates: list[float] = []
+    lwt = config.min_lwt
+    while lwt <= config.max_lwt + 1e-9:
+        candidates.append(round(lwt, 6))
+        lwt += config.lwt_step
+    return candidates or [config.min_lwt]
+
+
+def _output_candidates(config: MpcConfig) -> list[float]:
+    """Return the two inverter output levels (min and max), deduplicated.
+
+    Used by tests and diagnostics.  The solver itself performs per-hour
+    output selection rather than evaluating whole-horizon scenarios at
+    each output level.
+    """
+    max_kw = config.heat_pump_output_kw
+    min_kw = config.min_output_kw
+    if min_kw >= max_kw - 0.1:
+        return [max_kw]
+    return [min_kw, max_kw]

@@ -1,0 +1,174 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Data Sources",
+        "description": "Connect Heat Pump MPC to your existing integrations. These sensors provide the baseline data needed to optimize your heat pump's schedule.",
+        "data": {
+          "ha_entity_id": "Heating Analytics Entity",
+          "price_sensor": "Electricity Price Sensor",
+          "tank_temp_sensor": "Buffer Tank Temperature Sensor",
+          "weather_entity": "Weather Provider"
+        },
+        "data_description": {
+          "ha_entity_id": "Optional. Any sensor from the Heating Analytics instance you want to follow. Leave blank if you only have one instance installed.",
+          "price_sensor": "Optional. A Nordpool or Tibber sensor (must have raw_today/raw_tomorrow attributes). Leave blank to optimize for efficiency only without time-of-use shifting.",
+          "tank_temp_sensor": "The current temperature of the water inside your buffer tank.",
+          "weather_entity": "Used to fetch relative humidity forecasts, which helps predict defrost cycles and their impact on efficiency."
+        }
+      },
+      "heat_pump": {
+        "title": "Heat Pump & Tank",
+        "description": "Define the physical characteristics of your heating system. This allows the model to calculate how much heat your system can store and deliver.",
+        "data": {
+          "heat_pump_output_kw": "Nominal Thermal Output (Full Load)",
+          "min_output_kw": "Minimum Thermal Output",
+          "min_lwt": "Minimum Flow Temperature (LWT)",
+          "max_lwt": "Maximum Flow Temperature (LWT)",
+          "max_tank_temp": "Maximum Tank Temperature (Safety Ceiling)",
+          "tank_volume_liters": "Buffer Tank Volume",
+          "lwt_heating_cold": "Heating Curve: Flow at \u221210 \u00b0C",
+          "lwt_heating_mild": "Heating Curve: Flow at +10 \u00b0C",
+          "t_room": "Indoor Comfort Temperature"
+        },
+        "data_description": {
+          "heat_pump_output_kw": "Rated heating capacity at full inverter load in kW (check your datasheet).",
+          "min_output_kw": "Minimum thermal output at the lowest inverter speed in kW. The scheduler will test both minimum and full output to find the cheapest way to deliver heat.",
+          "min_lwt": "The absolute lowest flow temperature the heat pump should ever target.",
+          "max_lwt": "The highest flow temperature the heat pump is allowed to target.",
+          "max_tank_temp": "The scheduler will stop charging the buffer tank before it exceeds this temperature to prevent overheating.",
+          "tank_volume_liters": "Thermal storage capacity expressed as equivalent water volume (liters). For a standard buffer tank: enter the actual volume. For concrete thermal mass (e.g. heated slab): divide its heat capacity by 1.16 Wh/L·K — 30 tonnes of concrete ≈ 6000 L equivalent. For systems without hydraulic separation: enter the approximate pipe volume (minimum 10 L).",
+          "lwt_heating_cold": "Target flow temperature at \u221210 \u00b0C outdoors (from your heating curve). Used to understand the heat transfer capabilities of your floors or radiators.",
+          "lwt_heating_mild": "Target flow temperature at +10 \u00b0C outdoors. This, along with the cold setpoint, defines the slope of your heating curve.",
+          "t_room": "The target indoor temperature. Used with the heating curve to calculate the minimum flow temperature needed to keep the house warm."
+        }
+      },
+      "learning": {
+        "title": "COP Learning & Calibration",
+        "description": "Provide real-time measurement sensors to allow the integration to learn the true efficiency (COP) of your specific heat pump over time, replacing static factory estimates.\n\nAll fields are optional, but adding more sensors improves optimization accuracy.",
+        "data": {
+          "electrical_energy_sensor": "Electrical Energy Sensor",
+          "thermal_power_sensor": "Thermal Power Sensor (Heat Meter)",
+          "compressor_freq_sensor": "Compressor Frequency Sensor",
+          "use_flow_sensors": "Use Flow & Temperature Sensors (Track B)",
+          "flow_rate_sensor": "Water Flow Rate Sensor",
+          "flow_unit": "Flow Unit",
+          "supply_temp_sensor": "Supply Temperature Sensor",
+          "return_temp_sensor": "Return Temperature Sensor"
+        },
+        "data_description": {
+          "electrical_energy_sensor": "Cumulative energy consumption (kWh) of the heat pump. Crucial for COP learning.",
+          "thermal_power_sensor": "Instantaneous thermal output (kW) from a dedicated heat meter. This is the most accurate source for thermal power.",
+          "compressor_freq_sensor": "Compressor frequency (Hz) from the Modbus interface. Helps detect full-capacity operation and learn how output drops at low outdoor temperatures.",
+          "use_flow_sensors": "Enable this if you have a flow sensor and supply/return temperature sensors instead of a dedicated heat meter. The system will calculate thermal power using flow \u00d7 \u0394T.",
+          "flow_rate_sensor": "Water volume flow sensor on the heat pump circuit.",
+          "flow_unit": "The unit of measurement used by the flow rate sensor.",
+          "supply_temp_sensor": "The temperature of the water leaving the heat pump (flow side).",
+          "return_temp_sensor": "The temperature of the water returning to the heat pump."
+        }
+      },
+      "schedule": {
+        "title": "Optimization Tuning",
+        "description": "Advanced tuning parameters for the Model Predictive Control (MPC) scheduler. The defaults are well-tested for most homes.",
+        "data": {
+          "horizon_hours": "Optimization Horizon",
+          "lwt_step": "Flow Temperature Step",
+          "tank_standby_loss_kwh": "Tank Standby Heat Loss"
+        },
+        "data_description": {
+          "horizon_hours": "How many hours ahead the scheduler plans. 24 hours is recommended. Extend to 36\u201348 hours if tomorrow's electricity prices are available early.",
+          "lwt_step": "The temperature increment between candidate flow temperatures evaluated by the solver. A smaller step is more precise but takes longer to calculate.",
+          "tank_standby_loss_kwh": "Estimated heat lost from the buffer tank per hour (kWh) due to imperfect insulation."
+        }
+      },
+      "reconfigure": {
+        "title": "Edit: Data Sources",
+        "description": "Update the core sensors and weather provider that the optimizer uses.",
+        "data": {
+          "ha_entity_id": "Heating Analytics Entity",
+          "price_sensor": "Electricity Price Sensor",
+          "tank_temp_sensor": "Buffer Tank Temperature Sensor",
+          "weather_entity": "Weather Provider"
+        },
+        "data_description": {
+          "ha_entity_id": "Optional. Any sensor from the Heating Analytics instance you want to follow. Leave blank if you only have one instance installed.",
+          "price_sensor": "Optional. A Nordpool or Tibber sensor (must have raw_today/raw_tomorrow attributes). Leave blank to optimize for efficiency only without time-of-use shifting.",
+          "tank_temp_sensor": "The current temperature of the water inside your buffer tank.",
+          "weather_entity": "Used to fetch relative humidity forecasts, which helps predict defrost cycles and their impact on efficiency."
+        }
+      },
+      "reconfigure_heat_pump": {
+        "title": "Edit: Heat Pump & Tank",
+        "description": "Update the physical constraints and heating curve of your system.",
+        "data": {
+          "heat_pump_output_kw": "Nominal Thermal Output (Full Load)",
+          "min_output_kw": "Minimum Thermal Output",
+          "min_lwt": "Minimum Flow Temperature (LWT)",
+          "max_lwt": "Maximum Flow Temperature (LWT)",
+          "max_tank_temp": "Maximum Tank Temperature (Safety Ceiling)",
+          "tank_volume_liters": "Buffer Tank Volume",
+          "lwt_heating_cold": "Heating Curve: Flow at \u221210 \u00b0C",
+          "lwt_heating_mild": "Heating Curve: Flow at +10 \u00b0C",
+          "t_room": "Indoor Comfort Temperature"
+        },
+        "data_description": {
+          "heat_pump_output_kw": "Rated heating capacity at full inverter load in kW (check your datasheet).",
+          "min_output_kw": "Minimum thermal output at the lowest inverter speed in kW. The scheduler will test both minimum and full output to find the cheapest way to deliver heat.",
+          "min_lwt": "The absolute lowest flow temperature the heat pump should ever target.",
+          "max_lwt": "The highest flow temperature the heat pump is allowed to target.",
+          "max_tank_temp": "The scheduler will stop charging the buffer tank before it exceeds this temperature to prevent overheating.",
+          "tank_volume_liters": "Thermal storage capacity expressed as equivalent water volume (liters). For a standard buffer tank: enter the actual volume. For concrete thermal mass (e.g. heated slab): divide its heat capacity by 1.16 Wh/L·K — 30 tonnes of concrete ≈ 6000 L equivalent. For systems without hydraulic separation: enter the approximate pipe volume (minimum 10 L).",
+          "lwt_heating_cold": "Target flow temperature at \u221210 \u00b0C outdoors (from your heating curve). Used to understand the heat transfer capabilities of your floors or radiators.",
+          "lwt_heating_mild": "Target flow temperature at +10 \u00b0C outdoors. This, along with the cold setpoint, defines the slope of your heating curve.",
+          "t_room": "The target indoor temperature. Used with the heating curve to calculate the minimum flow temperature needed to keep the house warm."
+        }
+      },
+      "reconfigure_learning": {
+        "title": "Edit: COP Learning & Calibration",
+        "description": "Update measurement sensors to improve COP and capacity derating models.",
+        "data": {
+          "electrical_energy_sensor": "Electrical Energy Sensor",
+          "thermal_power_sensor": "Thermal Power Sensor (Heat Meter)",
+          "compressor_freq_sensor": "Compressor Frequency Sensor",
+          "use_flow_sensors": "Use Flow & Temperature Sensors (Track B)",
+          "flow_rate_sensor": "Water Flow Rate Sensor",
+          "flow_unit": "Flow Unit",
+          "supply_temp_sensor": "Supply Temperature Sensor",
+          "return_temp_sensor": "Return Temperature Sensor"
+        },
+        "data_description": {
+          "electrical_energy_sensor": "Cumulative energy consumption (kWh) of the heat pump. Crucial for COP learning.",
+          "thermal_power_sensor": "Instantaneous thermal output (kW) from a dedicated heat meter. This is the most accurate source for thermal power.",
+          "compressor_freq_sensor": "Compressor frequency (Hz) from the Modbus interface. Helps detect full-capacity operation and learn how output drops at low outdoor temperatures.",
+          "use_flow_sensors": "Enable this if you have a flow sensor and supply/return temperature sensors instead of a dedicated heat meter. The system will calculate thermal power using flow \u00d7 \u0394T.",
+          "flow_rate_sensor": "Water volume flow sensor on the heat pump circuit.",
+          "flow_unit": "The unit of measurement used by the flow rate sensor.",
+          "supply_temp_sensor": "The temperature of the water leaving the heat pump (flow side).",
+          "return_temp_sensor": "The temperature of the water returning to the heat pump."
+        }
+      },
+      "reconfigure_schedule": {
+        "title": "Edit: Optimization Tuning",
+        "description": "Adjust advanced optimization parameters.",
+        "data": {
+          "horizon_hours": "Optimization Horizon",
+          "lwt_step": "Flow Temperature Step",
+          "tank_standby_loss_kwh": "Tank Standby Heat Loss"
+        },
+        "data_description": {
+          "horizon_hours": "How many hours ahead the scheduler plans. 24 hours is recommended. Extend to 36\u201348 hours if tomorrow's electricity prices are available early.",
+          "lwt_step": "The temperature increment between candidate flow temperatures evaluated by the solver. A smaller step is more precise but takes longer to calculate.",
+          "tank_standby_loss_kwh": "Estimated heat lost from the buffer tank per hour (kWh) due to imperfect insulation."
+        }
+      }
+    },
+    "error": {
+      "max_lwt_below_min": "Maximum flow temperature must be strictly higher than the minimum.",
+      "max_tank_below_max_lwt": "The tank safety ceiling must be at least as high as the maximum flow temperature.",
+      "lwt_mild_above_cold": "Mild-weather flow temperature must be lower than the cold-weather flow temperature."
+    },
+    "abort": {
+      "already_configured": "This integration instance is already configured."
+    }
+  }
+}

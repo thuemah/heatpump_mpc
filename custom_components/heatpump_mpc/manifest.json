@@ -1,0 +1,13 @@
+{
+  "domain": "heatpump_mpc",
+  "name": "Heat Pump MPC",
+  "version": "0.1.0-alpha.1",
+  "config_flow": true,
+  "documentation": "https://github.com/thuemah/heatpump_mpc_dev",
+  "issue_tracker": "https://github.com/thuemah/heatpump_mpc_dev/issues",
+  "requirements": [],
+  "dependencies": ["weather", "sensor"],
+  "after_dependencies": ["heating_analytics"],
+  "codeowners": ["@thuemah"],
+  "iot_class": "local_polling"
+}

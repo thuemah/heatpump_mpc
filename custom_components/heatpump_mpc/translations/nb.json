@@ -1,0 +1,174 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Datakilder",
+        "description": "Koble Heat Pump MPC til dine eksisterende integrasjoner. Disse sensorene gir grunnlagsdataene som trengs for å optimalisere varmepumpens tidsplan.",
+        "data": {
+          "ha_entity_id": "Heating Analytics-entitet",
+          "price_sensor": "Strømprissensor",
+          "tank_temp_sensor": "Temperatursensor for akkumulatortank",
+          "weather_entity": "Værtjeneste"
+        },
+        "data_description": {
+          "ha_entity_id": "Valgfri. Hvilken som helst sensor fra den Heating Analytics-instansen du \u00f8nsker \u00e5 f\u00f8lge. La st\u00e5 tom hvis du bare har \u00e9n instans installert.",
+          "price_sensor": "Valgfri. En Nordpool- eller Tibber-sensor (m\u00e5 ha attributtene raw_today/raw_tomorrow). La st\u00e5 tom for \u00e5 optimalisere kun for effektivitet uten lastforskyvning etter str\u00f8mpris.",
+          "tank_temp_sensor": "N\u00e5v\u00e6rende temperatur p\u00e5 vannet i akkumulatortanken din.",
+          "weather_entity": "Brukes til \u00e5 hente prognoser for relativ fuktighet, som bidrar til \u00e5 forutse avrimingssykluser og deres p\u00e5virkning p\u00e5 effektiviteten."
+        }
+      },
+      "heat_pump": {
+        "title": "Varmepumpe og tank",
+        "description": "Definer de fysiske egenskapene til varmesystemet ditt. Dette gj\u00f8r det mulig for modellen \u00e5 beregne hvor mye varme systemet ditt kan lagre og levere.",
+        "data": {
+          "heat_pump_output_kw": "Nominell termisk effekt (full last)",
+          "min_output_kw": "Minimum termisk effekt",
+          "min_lwt": "Minimum turtemperatur (LWT)",
+          "max_lwt": "Maksimum turtemperatur (LWT)",
+          "max_tank_temp": "Maksimum tanktemperatur (sikkerhetsgrense)",
+          "tank_volume_liters": "Volum p\u00e5 akkumulatortank",
+          "lwt_heating_cold": "Varmekurve: Turtemperatur ved \u221210 \u00b0C",
+          "lwt_heating_mild": "Varmekurve: Turtemperatur ved +10 \u00b0C",
+          "t_room": "Innend\u00f8rs komforttemperatur"
+        },
+        "data_description": {
+          "heat_pump_output_kw": "Nominell varmekapasitet ved full inverterlast i kW (se datablad).",
+          "min_output_kw": "Minimum termisk effekt ved laveste inverterhastighet i kW. Optimalisereren vil teste b\u00e5de minimum og full effekt for \u00e5 finne den billigste m\u00e5ten \u00e5 levere varme p\u00e5.",
+          "min_lwt": "Den absolutt laveste turtemperaturen varmepumpen noen gang b\u00f8r sikte mot.",
+          "max_lwt": "Den h\u00f8yeste turtemperaturen varmepumpen har lov til \u00e5 sikte mot.",
+          "max_tank_temp": "Optimalisereren vil stoppe oppvarmingen av akkumulatortanken f\u00f8r den overstiger denne temperaturen for \u00e5 forhindre overoppheting.",
+          "tank_volume_liters": "Systemets termiske lagringskapasitet, uttrykt som ekvivalent vannvolum (liter). For en standard akkumulatortank: angi faktisk volum. For betongmasse (f.eks. betonggulv): del varmekapasiteten på 1,16 Wh/L·K — 30 tonn betong ≈ 6000 L ekvivalent. For systemer uten hydraulisk separasjon: angi omtrentlig rørvolum (minimum 10 L).",
+          "lwt_heating_cold": "M\u00e5lsatt turtemperatur ved \u221210 \u00b0C utend\u00f8rs (fra varmekurven din). Brukes for \u00e5 forst\u00e5 varmeoverf\u00f8ringskapasiteten til gulv eller radiatorer.",
+          "lwt_heating_mild": "M\u00e5lsatt turtemperatur ved +10 \u00b0C utend\u00f8rs. Dette, sammen med det kalde settpunktet, definerer hellingen p\u00e5 varmekurven din.",
+          "t_room": "M\u00e5lsatt innetemperatur. Brukes sammen med varmekurven for \u00e5 beregne minimum turtemperatur som kreves for \u00e5 holde huset varmt."
+        }
+      },
+      "learning": {
+        "title": "COP-l\u00e6ring og kalibrering",
+        "description": "Oppgi sensorer for sanntidsm\u00e5ling for \u00e5 la integrasjonen l\u00e6re den virkelige effektiviteten (COP) til din spesifikke varmepumpe over tid, og dermed erstatte statiske fabrikkestimater.\n\nAlle felt er valgfrie, men \u00e5 legge til flere sensorer forbedrer n\u00f8yaktigheten av optimaliseringen.",
+        "data": {
+          "electrical_energy_sensor": "Elektrisk energisensor",
+          "thermal_power_sensor": "Termisk effektsensor (varmem\u00e5ler)",
+          "compressor_freq_sensor": "Kompressorfrekvenssensor",
+          "use_flow_sensors": "Bruk flow- og temperatursensorer (Track B)",
+          "flow_rate_sensor": "Sensor for vannstr\u00f8mning (flow)",
+          "flow_unit": "Str\u00f8mningsenhet (flow)",
+          "supply_temp_sensor": "Turtemperatursensor",
+          "return_temp_sensor": "Returtemperatursensor"
+        },
+        "data_description": {
+          "electrical_energy_sensor": "Akkumulert energiforbruk (kWh) for varmepumpen. Avgj\u00f8rende for COP-l\u00e6ring.",
+          "thermal_power_sensor": "\u00d8yeblikkelig termisk effekt (kW) fra en dedikert varmem\u00e5ler. Dette er den mest n\u00f8yaktige kilden for termisk effekt.",
+          "compressor_freq_sensor": "Kompressorfrekvens (Hz) fra Modbus-grensesnittet. Hjelper med \u00e5 oppdage drift med full kapasitet og l\u00e6re hvordan effekten faller ved lave utetemperaturer.",
+          "use_flow_sensors": "Aktiver dette hvis du har en str\u00f8mningssensor og tur/retur-temperatursensorer i stedet for en dedikert varmem\u00e5ler. Systemet vil beregne termisk effekt ved hjelp av str\u00f8mning \u00d7 \u0394T.",
+          "flow_rate_sensor": "Vannstr\u00f8mningssensor p\u00e5 varmepumpekretsen.",
+          "flow_unit": "M\u00e5leenheten som brukes av str\u00f8mningssensoren.",
+          "supply_temp_sensor": "Temperaturen p\u00e5 vannet som forlader varmepumpen (tursiden).",
+          "return_temp_sensor": "Temperaturen p\u00e5 vannet som returnerer til varmepumpen."
+        }
+      },
+      "schedule": {
+        "title": "Finjustering av optimalisering",
+        "description": "Avanserte parametere for \u00e5 finjustere Model Predictive Control (MPC)-optimaliseringen. Standardverdiene er godt testet for de fleste hjem.",
+        "data": {
+          "horizon_hours": "Optimaliseringshorisont",
+          "lwt_step": "Temperatursteg for turtemperatur",
+          "tank_standby_loss_kwh": "Varmetap for akkumulatortank i standby"
+        },
+        "data_description": {
+          "horizon_hours": "Hvor mange timer fremover optimalisereren planlegger. 24 timer anbefales. Utvid til 36\u201348 timer hvis morgendagens str\u00f8mpriser er tilgjengelige tidlig.",
+          "lwt_step": "Temperatur\u00f8kningen mellom kandidat-turtemperaturer evaluert av l\u00f8seren. Et mindre steg er mer presist, men tar lengre tid \u00e5 beregne.",
+          "tank_standby_loss_kwh": "Estimert varmetap fra akkumulatortanken per time (kWh) p\u00e5 grunn av ufullstendig isolasjon."
+        }
+      },
+      "reconfigure": {
+        "title": "Rediger: Datakilder",
+        "description": "Oppdater kjernesensorene og værtjenesten som optimalisereren bruker.",
+        "data": {
+          "ha_entity_id": "Heating Analytics-entitet",
+          "price_sensor": "Strømprissensor",
+          "tank_temp_sensor": "Temperatursensor for akkumulatortank",
+          "weather_entity": "Værtjeneste"
+        },
+        "data_description": {
+          "ha_entity_id": "Valgfri. Hvilken som helst sensor fra den Heating Analytics-instansen du \u00f8nsker \u00e5 f\u00f8lge. La st\u00e5 tom hvis du bare har \u00e9n instans installert.",
+          "price_sensor": "Valgfri. En Nordpool- eller Tibber-sensor (m\u00e5 ha attributtene raw_today/raw_tomorrow). La st\u00e5 tom for \u00e5 optimalisere kun for effektivitet uten lastforskyvning etter str\u00f8mpris.",
+          "tank_temp_sensor": "N\u00e5v\u00e6rende temperatur p\u00e5 vannet i akkumulatortanken din.",
+          "weather_entity": "Brukes til \u00e5 hente prognoser for relativ fuktighet, som bidrar til \u00e5 forutse avrimingssykluser og deres p\u00e5virkning p\u00e5 effektiviteten."
+        }
+      },
+      "reconfigure_heat_pump": {
+        "title": "Rediger: Varmepumpe og tank",
+        "description": "Oppdater de fysiske begrensningene og varmekurven for systemet ditt.",
+        "data": {
+          "heat_pump_output_kw": "Nominell termisk effekt (full last)",
+          "min_output_kw": "Minimum termisk effekt",
+          "min_lwt": "Minimum turtemperatur (LWT)",
+          "max_lwt": "Maksimum turtemperatur (LWT)",
+          "max_tank_temp": "Maksimum tanktemperatur (sikkerhetsgrense)",
+          "tank_volume_liters": "Volum p\u00e5 akkumulatortank",
+          "lwt_heating_cold": "Varmekurve: Turtemperatur ved \u221210 \u00b0C",
+          "lwt_heating_mild": "Varmekurve: Turtemperatur ved +10 \u00b0C",
+          "t_room": "Innend\u00f8rs komforttemperatur"
+        },
+        "data_description": {
+          "heat_pump_output_kw": "Nominell varmekapasitet ved full inverterlast i kW (se datablad).",
+          "min_output_kw": "Minimum termisk effekt ved laveste inverterhastighet i kW. Optimalisereren vil teste b\u00e5de minimum og full effekt for \u00e5 finne den billigste m\u00e5ten \u00e5 levere varme p\u00e5.",
+          "min_lwt": "Den absolutt laveste turtemperaturen varmepumpen noen gang b\u00f8r sikte mot.",
+          "max_lwt": "Den h\u00f8yeste turtemperaturen varmepumpen har lov til \u00e5 sikte mot.",
+          "max_tank_temp": "Optimalisereren vil stoppe oppvarmingen av akkumulatortanken f\u00f8r den overstiger denne temperaturen for \u00e5 forhindre overoppheting.",
+          "tank_volume_liters": "Systemets termiske lagringskapasitet, uttrykt som ekvivalent vannvolum (liter). For en standard akkumulatortank: angi faktisk volum. For betongmasse (f.eks. betonggulv): del varmekapasiteten på 1,16 Wh/L·K — 30 tonn betong ≈ 6000 L ekvivalent. For systemer uten hydraulisk separasjon: angi omtrentlig rørvolum (minimum 10 L).",
+          "lwt_heating_cold": "M\u00e5lsatt turtemperatur ved \u221210 \u00b0C utend\u00f8rs (fra varmekurven din). Brukes for \u00e5 forst\u00e5 varmeoverf\u00f8ringskapasiteten til gulv eller radiatorer.",
+          "lwt_heating_mild": "M\u00e5lsatt turtemperatur ved +10 \u00b0C utend\u00f8rs. Dette, sammen med det kalde settpunktet, definerer hellingen p\u00e5 varmekurven din.",
+          "t_room": "M\u00e5lsatt innetemperatur. Brukes sammen med varmekurven for \u00e5 beregne minimum turtemperatur som kreves for \u00e5 holde huset varmt."
+        }
+      },
+      "reconfigure_learning": {
+        "title": "Rediger: COP-l\u00e6ring og kalibrering",
+        "description": "Oppdater m\u00e5lesensorer for \u00e5 forbedre modellene for COP og kapasitetsreduksjon.",
+        "data": {
+          "electrical_energy_sensor": "Elektrisk energisensor",
+          "thermal_power_sensor": "Termisk effektsensor (varmem\u00e5ler)",
+          "compressor_freq_sensor": "Kompressorfrekvenssensor",
+          "use_flow_sensors": "Bruk flow- og temperatursensorer (Track B)",
+          "flow_rate_sensor": "Sensor for vannstr\u00f8mning (flow)",
+          "flow_unit": "Str\u00f8mningsenhet (flow)",
+          "supply_temp_sensor": "Turtemperatursensor",
+          "return_temp_sensor": "Returtemperatursensor"
+        },
+        "data_description": {
+          "electrical_energy_sensor": "Akkumulert energiforbruk (kWh) for varmepumpen. Avgj\u00f8rende for COP-l\u00e6ring.",
+          "thermal_power_sensor": "\u00d8yeblikkelig termisk effekt (kW) fra en dedikert varmem\u00e5ler. Dette er den mest n\u00f8yaktige kilden for termisk effekt.",
+          "compressor_freq_sensor": "Kompressorfrekvens (Hz) fra Modbus-grensesnittet. Hjelper med \u00e5 oppdage drift med full kapasitet og l\u00e6re hvordan effekten faller ved lave utetemperaturer.",
+          "use_flow_sensors": "Aktiver dette hvis du har en str\u00f8mningssensor og tur/retur-temperatursensorer i stedet for en dedikert varmem\u00e5ler. Systemet vil beregne termisk effekt ved hjelp av str\u00f8mning \u00d7 \u0394T.",
+          "flow_rate_sensor": "Vannstr\u00f8mningssensor p\u00e5 varmepumpekretsen.",
+          "flow_unit": "M\u00e5leenheten som brukes av str\u00f8mningssensoren.",
+          "supply_temp_sensor": "Temperaturen p\u00e5 vannet som forlader varmepumpen (tursiden).",
+          "return_temp_sensor": "Temperaturen p\u00e5 vannet som returnerer til varmepumpen."
+        }
+      },
+      "reconfigure_schedule": {
+        "title": "Rediger: Finjustering av optimalisering",
+        "description": "Juster avanserte optimaliseringsparametere.",
+        "data": {
+          "horizon_hours": "Optimaliseringshorisont",
+          "lwt_step": "Temperatursteg for turtemperatur",
+          "tank_standby_loss_kwh": "Varmetap for akkumulatortank i standby"
+        },
+        "data_description": {
+          "horizon_hours": "Hvor mange timer fremover optimalisereren planlegger. 24 timer anbefales. Utvid til 36\u201348 timer hvis morgendagens str\u00f8mpriser er tilgjengelige tidlig.",
+          "lwt_step": "Temperatur\u00f8kningen mellom kandidat-turtemperaturer evaluert av l\u00f8seren. Et mindre steg er mer presist, men tar lengre tid \u00e5 beregne.",
+          "tank_standby_loss_kwh": "Estimert varmetap fra akkumulatortanken per time (kWh) p\u00e5 grunn av ufullstendig isolasjon."
+        }
+      }
+    },
+    "error": {
+      "max_lwt_below_min": "Maksimum turtemperatur m\u00e5 v\u00e6re strengt h\u00f8yere enn minimum.",
+      "max_tank_below_max_lwt": "Tankens sikkerhetsgrense m\u00e5 v\u00e6re minst like h\u00f8y som maksimal turtemperatur.",
+      "lwt_mild_above_cold": "Turtemperatur ved mildt v\u00e6r m\u00e5 v\u00e6re lavere enn turtemperatur ved kaldt v\u00e6r."
+    },
+    "abort": {
+      "already_configured": "Denne integrasjonsinstansen er allerede konfigurert."
+    }
+  }
+}
