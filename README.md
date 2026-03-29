@@ -43,10 +43,16 @@ The MPC calculates the optimal leaving water temperature (LWT) setpoint and outp
 | Entity | What it provides |
 |---|---|
 | `number.heat_pump_mpc_lwt_setpoint` | Recommended flow temperature (°C) |
-| `sensor.heat_pump_mpc_optimal_output_kw` | Recommended output level (kW) |
+| `sensor.heat_pump_mpc_optimal_output` | Recommended output level (kW) |
 | `binary_sensor.heat_pump_mpc_pump_on` | Whether the pump should run this hour |
 | `binary_sensor.heat_pump_mpc_dhw_mode_on` | Whether the pump should run in DHW mode this hour |
 | `number.heat_pump_mpc_dhw_setpoint` | Recommended DHW setpoint (°C) |
+| `sensor.heat_pump_mpc_optimal_flow_temperature` | Read-only mirror of the solver's recommended LWT (°C) |
+| `sensor.heat_pump_mpc_estimated_cop` | Effective COP for the current hour |
+| `sensor.heat_pump_mpc_projected_heating_cost` | Projected electricity cost over horizon |
+| `sensor.heat_pump_mpc_next_run_start` | Timestamp of the next scheduled pump start |
+| `sensor.heat_pump_mpc_sh_thermal_energy` | Cumulative space-heating thermal energy (kWh_th) |
+| `binary_sensor.heat_pump_mpc_schedule_feasible` | True when the solver satisfied all constraints |
 
 **You are responsible for building the control layer** that reads these entities and writes to your heat pump. This is intentional: heat pump interfaces vary wildly (Modbus RTU/TCP, proprietary APIs, climate entities, ESPAltherma, etc.), and blindly writing setpoints without understanding your specific unit's safety mechanisms can trigger fault codes or lockouts.
 

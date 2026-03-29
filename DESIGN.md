@@ -63,14 +63,15 @@ Heat Pump MPC (this integration)
 
 Outputs (HA entities)
   number.lwt_setpoint               (°C, auto-tracks solver recommendation)
-  sensor.optimal_flow_temp          (°C)
+  sensor.optimal_flow_temperature   (°C)
   sensor.optimal_output             (kW)
   sensor.estimated_cop              (dimensionless)
   sensor.projected_heating_cost     (currency)
   sensor.next_run_start             (timestamp)
-  binary_sensor.pump_on_now         (boolean)
+  sensor.sh_thermal_energy          (kWh)
+  binary_sensor.pump_on         (boolean)
   binary_sensor.schedule_feasible   (problem device class, True = infeasible)
-  binary_sensor.dhw_on_now          (boolean)
+  binary_sensor.dhw_mode_on          (boolean)
   number.dhw_setpoint               (°C)
 ```
 
@@ -437,13 +438,14 @@ Runs every 30 minutes as a `DataUpdateCoordinator`.
 |--------|------|-------------|
 | `number.lwt_setpoint` | °C | LWT setpoint that tracks the solver recommendation; writable for manual override (reset on next coordinator update) |
 | `number.dhw_setpoint` | °C | Recommended DHW target temperature |
-| `sensor.optimal_flow_temp` | °C | Read-only mirror of the solver's recommended LWT; `schedule` attribute has full per-hour plan |
+| `sensor.optimal_flow_temperature` | °C | Read-only mirror of the solver's recommended LWT; `schedule` attribute has full per-hour plan |
 | `sensor.optimal_output` | kW | Inverter output level for the current hour (hour 0 of the optimal schedule) |
 | `sensor.estimated_cop` | — | Effective COP for the current hour |
 | `sensor.projected_heating_cost` | currency | Total cost over horizon |
 | `sensor.next_run_start` | timestamp | Next scheduled pump-on hour |
-| `binary_sensor.pump_on_now` | boolean | Whether the current hour is scheduled for Space Heating |
-| `binary_sensor.dhw_on_now` | boolean | Whether the current hour is scheduled for DHW |
+| `sensor.sh_thermal_energy` | kWh | Cumulative space-heating thermal energy |
+| `binary_sensor.pump_on` | boolean | Whether the current hour is scheduled for Space Heating |
+| `binary_sensor.dhw_mode_on` | boolean | Whether the current hour is scheduled for DHW |
 | `binary_sensor.schedule_feasible` | problem | `on` = infeasible (tank cannot meet demand) |
 
 Modbus setpoint writing is handled by a separate HA automation that reads
@@ -460,7 +462,7 @@ custom_components/heatpump_mpc/
 ├── coordinator.py       # DataUpdateCoordinator, learning pipeline
 ├── sensor.py            # 5 sensor entities
 ├── binary_sensor.py     # 2 binary sensor entities
-├── number.py            # 1 number entity (LWT setpoint, writable)
+├── number.py            # 2 number entities (LWT and DHW setpoint, writable)
 ├── config_flow.py       # 4-step setup + reconfigure flow
 ├── storage.py           # Persistent learner state (HA Store wrapper)
 ├── const.py             # All config keys, defaults, result keys
