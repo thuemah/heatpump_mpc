@@ -61,11 +61,13 @@ from .const import (
     CONF_RETURN_TEMP_SENSOR,
     CONF_DHW_ENABLED,
     CONF_DHW_TEMP_SENSOR,
+    CONF_DHW_OPERATION_SENSOR,
     CONF_DHW_TANK_VOLUME_L,
     CONF_DHW_MIN_TEMP,
     CONF_DHW_TARGET_TEMP,
     CONF_DHW_LWT,
     CONF_DHW_DAILY_DEMAND_KWH,
+    CONF_DHW_READY_TIMES,
     DEFAULT_WEATHER_ENTITY,
     DEFAULT_PRICE_SENSOR,
     DEFAULT_TANK_TEMP_SENSOR,
@@ -113,6 +115,7 @@ from .const import (
     RESULT_DHW_ON_NOW,
     RESULT_DHW_SETPOINT,
     RESULT_DHW_PLANNED_HOURS,
+    RESULT_SH_THERMAL_ENERGY_TOTAL_KWH,
 )
 from .core.cop_learner import CopLearner, CopLearnerState, CopObservation
 from .core.heat_pump_model import HeatPumpModel
@@ -157,17 +160,34 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
         # DHW state tracking — used for COP contamination filter.
         self._prev_dhw_temp: float | None = None
 
+        # SH thermal energy accumulation (Track C)
+        # _sh_total_kwh_th: lifetime cumulative SH thermal kWh (total_increasing sensor)
+        # _sh_hourly_buffer: rolling list of completed-hour records for get_sh_hourly service
+        # _sh_hour_start: datetime of the hour currently being accumulated
+        # _sh_current_hour_kwh: thermal kWh accumulator for the in-progress hour
+        # _sh_current_hour_kwh_el: electrical kWh accumulator for SH windows in the in-progress hour
+        # _sh_current_hour_sh_windows: count of 30-min SH windows in the in-progress hour
+        # _sh_current_hour_dhw_windows: count of 30-min DHW windows in the in-progress hour
+        self._sh_total_kwh_th: float = 0.0
+        self._sh_hourly_buffer: list[dict] = []
+        self._sh_hour_start: datetime | None = None
+        self._sh_current_hour_kwh: float = 0.0
+        self._sh_current_hour_kwh_el: float = 0.0
+        self._sh_current_hour_sh_windows: int = 0
+        self._sh_current_hour_dhw_windows: int = 0
+
     # ------------------------------------------------------------------
     # Setup
     # ------------------------------------------------------------------
 
     async def async_setup(self) -> None:
         """
-        Load persisted learner state from storage.
+        Load persisted learner and SH state from storage.
 
         Must be awaited before the first :py:meth:`_async_update_data` call
-        so that learned COP / capacity parameters are available immediately
-        rather than reverting to cold-start defaults after every HA restart.
+        so that learned COP / capacity parameters and SH totals are available
+        immediately rather than reverting to cold-start defaults after every
+        HA restart.
         """
         state = await self._storage.async_load_learner_state()
         self._learner = CopLearner(state)
@@ -177,6 +197,10 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
             state.f_defrost,
             state.eta_carnot_samples,
         )
+
+        sh_total, sh_buffer = await self._storage.async_load_sh_state()
+        self._sh_total_kwh_th = sh_total
+        self._sh_hourly_buffer = sh_buffer
 
     # ------------------------------------------------------------------
     # DataUpdateCoordinator protocol
@@ -214,7 +238,15 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
                 )
 
             k_emission = self._compute_k_emission(horizon)
-            config = self._build_mpc_config(k_emission=k_emission)
+            dhw_enabled = bool(self.entry.data.get(CONF_DHW_ENABLED, False))
+            if dhw_enabled and horizon:
+                horizon_start = now.replace(minute=0, second=0, microsecond=0)
+                ready_by_hours = self._compute_ready_by_indices(horizon_start, len(horizon))
+            else:
+                ready_by_hours = []
+            config = self._build_mpc_config(
+                k_emission=k_emission, dhw_ready_by_hours=ready_by_hours
+            )
 
             # Learn from real measurements taken since the last update, then
             # update the capacity curve in the model before running the solver.
@@ -230,7 +262,12 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
             self._prev_tank_temp = tank_temp
             self._prev_optimal_lwt = result.optimal_lwt
             self._prev_dhw_temp = dhw_tank_temp
-            return _result_to_dict(result)
+
+            result_dict = _result_to_dict(result)
+            result_dict[RESULT_SH_THERMAL_ENERGY_TOTAL_KWH] = round(
+                self._sh_total_kwh_th, 4
+            )
+            return result_dict
 
         except UpdateFailed:
             raise
@@ -438,6 +475,102 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
             )
             return DEFAULT_DHW_TANK_TEMP
 
+    def _read_dhw_operation_sensor(self) -> bool:
+        """Return True when the DHW operation sensor reports the HP is in DHW mode.
+
+        Returns False when the sensor is not configured, unavailable, or "off".
+        Treats any state other than "on" as inactive so that transient
+        "unavailable" states do not accidentally suppress COP observations.
+        """
+        entity_id = self.entry.data.get(CONF_DHW_OPERATION_SENSOR)
+        if not entity_id:
+            return False
+        state = self.hass.states.get(entity_id)
+        if state is None or state.state in ("unknown", "unavailable", ""):
+            return False
+        return state.state == "on"
+
+    # ------------------------------------------------------------------
+    # SH thermal energy accumulation helpers (Track C)
+    # ------------------------------------------------------------------
+
+    @property
+    def sh_hourly_buffer(self) -> list[dict]:
+        """Rolling buffer of completed per-hour SH thermal energy records.
+
+        Each entry contains:
+        - ``datetime``:  ISO timestamp of the hour start.
+        - ``kwh_th_sh``: Thermal kWh delivered for space heating (0.0 during DHW/off hours).
+        - ``kwh_el_sh``: Electrical kWh consumed during SH windows in this hour.
+          Heating Analytics can derive average COP as ``kwh_th_sh / kwh_el_sh``.
+        - ``mode``:      ``"sh"`` when SH windows dominated, ``"dhw"`` when DHW
+          windows dominated, ``"off"`` when neither recorded any consumption.
+
+        The buffer holds up to 48 entries (two days).
+        """
+        return self._sh_hourly_buffer
+
+    def _finalize_sh_hour_if_needed(self, now: datetime) -> None:
+        """Flush the current SH accumulator to the buffer when the clock hour turns.
+
+        Called at the start of every :py:meth:`_learn_from_sensors` invocation
+        so that hour boundaries are always detected, even when electrical data
+        is unavailable or the DHW filter is active.
+
+        On the very first call (``_sh_hour_start is None``) the method simply
+        records the current hour as the start of tracking without flushing.
+        """
+        now_hour_start = now.replace(minute=0, second=0, microsecond=0)
+
+        if self._sh_hour_start is None:
+            # First call — initialise tracking; nothing to flush yet.
+            self._sh_hour_start = now_hour_start
+            return
+
+        if now_hour_start <= self._sh_hour_start:
+            # Still within the same hour — nothing to do.
+            return
+
+        # Clock has advanced to a new hour; finalise the previous one.
+        if self._sh_current_hour_sh_windows > self._sh_current_hour_dhw_windows:
+            mode = "sh"
+        elif self._sh_current_hour_dhw_windows > self._sh_current_hour_sh_windows:
+            mode = "dhw"
+        else:
+            mode = "off"
+
+        entry: dict = {
+            "datetime": self._sh_hour_start.isoformat(),
+            "kwh_th_sh": round(self._sh_current_hour_kwh, 4),
+            "kwh_el_sh": round(self._sh_current_hour_kwh_el, 4),
+            "mode": mode,
+        }
+        self._sh_hourly_buffer.append(entry)
+        if len(self._sh_hourly_buffer) > 48:
+            self._sh_hourly_buffer = self._sh_hourly_buffer[-48:]
+
+        _LOGGER.debug(
+            "SH hourly: finalized %s → %.4f kWh_th %.4f kWh_el mode=%s (buffer size=%d)",
+            self._sh_hour_start.isoformat(),
+            self._sh_current_hour_kwh,
+            self._sh_current_hour_kwh_el,
+            mode,
+            len(self._sh_hourly_buffer),
+        )
+
+        self._sh_current_hour_kwh = 0.0
+        self._sh_current_hour_kwh_el = 0.0
+        self._sh_current_hour_sh_windows = 0
+        self._sh_current_hour_dhw_windows = 0
+        self._sh_hour_start = now_hour_start
+
+        # Persist so the buffer survives HA restarts.
+        self._storage.schedule_full_save(
+            self._learner.state,
+            self._sh_total_kwh_th,
+            self._sh_hourly_buffer,
+        )
+
     # ------------------------------------------------------------------
     # COP / capacity learning helpers
     # ------------------------------------------------------------------
@@ -451,7 +584,8 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
     ) -> None:
         """
         Attempt to build a :class:`CopObservation` from current sensor readings
-        and submit it to the learner.
+        and submit it to the learner.  Also accumulates SH thermal energy for
+        the ``get_sh_hourly`` service and the ``total_increasing`` energy sensor.
 
         Called every coordinator update (every 30 minutes).  All sensor reads
         degrade gracefully: missing sensors are skipped rather than raising.
@@ -465,12 +599,35 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
         When a DHW temp sensor is configured and the DHW tank temperature rose
         by more than 0.5 °C since the last cycle, the heat pump was likely
         running in DHW mode (high LWT).  COP observations taken during DHW mode
-        would contaminate the SH COP model, so the cycle is skipped.
+        would contaminate the SH COP model, so the cycle is skipped and no SH
+        energy is accumulated for that window.
+
+        SH thermal energy accumulation
+        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        For every SH window, ``kWh_th_sh = COP_sh × Δ_kWh_el`` is accumulated
+        into the current-hour bucket.  Completed hours are flushed into the
+        rolling ``_sh_hourly_buffer``.  The electrical energy sensor is the only
+        hard dependency; the heat meter / flow sensors are NOT required here
+        (they are used only for COP learning, below).
         """
         d = self.entry.data
 
+        # --- Hour-boundary finalization (always, before any early return) ---
+        self._finalize_sh_hour_if_needed(now)
+
         # --- DHW contamination filter ---
-        if dhw_tank_temp_now is not None and self._prev_dhw_temp is not None:
+        # Priority 1: direct operation sensor — reliable, catches DHW mode even
+        # when the tank is near target temperature (small or zero thermal rise).
+        # Priority 2: temperature-rise heuristic — fallback when no sensor is
+        # configured (existing behaviour, unchanged).
+        _dhw_skip = False
+        if self._read_dhw_operation_sensor():
+            _LOGGER.debug(
+                "DHW contamination filter: operation sensor ON "
+                "— skipping COP observation (HP running in DHW mode).",
+            )
+            _dhw_skip = True
+        elif dhw_tank_temp_now is not None and self._prev_dhw_temp is not None:
             dhw_rise = dhw_tank_temp_now - self._prev_dhw_temp
             if dhw_rise > 0.5:
                 _LOGGER.debug(
@@ -480,14 +637,18 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
                     self._prev_dhw_temp,
                     dhw_tank_temp_now,
                 )
-                # Still advance the electrical baseline so the next cycle
-                # uses a clean delta window.
-                elec_kwh_baseline = self._read_float_state(
-                    d.get(CONF_ELECTRICAL_ENERGY_SENSOR)
-                )
-                if elec_kwh_baseline is not None:
-                    self._prev_elec_kwh = elec_kwh_baseline
-                return
+                _dhw_skip = True
+        if _dhw_skip:
+            # Count this 30-min slot as a DHW window for mode determination.
+            self._sh_current_hour_dhw_windows += 1
+            # Still advance the electrical baseline so the next cycle
+            # uses a clean delta window.  No SH energy accumulated for this window.
+            elec_kwh_baseline = self._read_float_state(
+                d.get(CONF_ELECTRICAL_ENERGY_SENSOR)
+            )
+            if elec_kwh_baseline is not None:
+                self._prev_elec_kwh = elec_kwh_baseline
+            return
 
         # --- Electrical energy delta ---
         elec_kwh_now = self._read_float_state(d.get(CONF_ELECTRICAL_ENERGY_SENSOR))
@@ -509,14 +670,9 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
         if duration_h < 0.1:
             return  # Unexpectedly short window; skip.
 
-        # --- Thermal output ---
-        heat_kw = self._read_thermal_kw(d)
-        if heat_kw is None:
-            self._prev_elec_kwh = elec_kwh_now
-            return
-        heat_kwh = heat_kw * duration_h
-
         # --- Contextual conditions from current horizon slot ---
+        # Computed here (before the thermal-output check) so the SH accumulation
+        # below works even when no heat meter is configured.
         t_outdoor = horizon[0].t_outdoor if horizon else 5.0
         rh = horizon[0].rh if horizon else DEFAULT_RH
         # Use the LWT the MPC actually recommended last cycle; fall back to
@@ -526,6 +682,39 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
             if self._prev_optimal_lwt is not None
             else float(d.get(CONF_MIN_LWT, DEFAULT_MIN_LWT))
         )
+
+        # --- SH thermal energy accumulation (Track C) ---
+        # kWh_th_sh = COP_sh × Δ_kWh_el  — no heat meter required.
+        cop_sh = max(1.0, self._model.get_effective_cop(t_outdoor, rh, lwt))
+        sh_kwh = cop_sh * elec_delta
+        self._sh_current_hour_sh_windows += 1
+        self._sh_current_hour_kwh += sh_kwh
+        self._sh_current_hour_kwh_el += elec_delta
+        self._sh_total_kwh_th += sh_kwh
+        _LOGGER.debug(
+            "SH accumulation: cop_sh=%.2f elec_delta=%.4f kWh → sh=%.4f kWh "
+            "(hour_th=%.4f hour_el=%.4f total=%.3f)",
+            cop_sh,
+            elec_delta,
+            sh_kwh,
+            self._sh_current_hour_kwh,
+            self._sh_current_hour_kwh_el,
+            self._sh_total_kwh_th,
+        )
+
+        # --- Thermal output (for COP learning only) ---
+        heat_kw = self._read_thermal_kw(d)
+        if heat_kw is None:
+            # No heat meter available — SH energy already accumulated above;
+            # schedule a save and exit (COP learning skipped this cycle).
+            self._prev_elec_kwh = elec_kwh_now
+            self._storage.schedule_full_save(
+                self._learner.state,
+                self._sh_total_kwh_th,
+                self._sh_hourly_buffer,
+            )
+            return
+        heat_kwh = heat_kw * duration_h
 
         # --- Implicit full-load detection from previous MPC decision ---
         is_full_load = (
@@ -565,9 +754,12 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
             result.capacity_frac_observed or 0,
         )
 
-        # Persist state so learned parameters survive HA restarts.
-        # Uses debounced write — multiple rapid calls coalesce into one disk write.
-        await self._storage.async_save_learner_state(self._learner.state)
+        # Persist learner + SH state (debounced — multiple rapid calls coalesce).
+        self._storage.schedule_full_save(
+            self._learner.state,
+            self._sh_total_kwh_th,
+            self._sh_hourly_buffer,
+        )
 
         self._prev_elec_kwh = elec_kwh_now
 
@@ -788,10 +980,69 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
         return fallback_k
 
     # ------------------------------------------------------------------
+    # DHW ready-by index conversion
+    # ------------------------------------------------------------------
+
+    def _compute_ready_by_indices(
+        self, horizon_start: datetime, n_hours: int
+    ) -> list[int]:
+        """Convert user-configured HH:MM ready-by strings to horizon slot indices.
+
+        For each time string the method finds the first horizon slot whose
+        **end** coincides with the specified hour.  Slot ``i`` covers the
+        period ``[horizon_start + i·h,  horizon_start + (i+1)·h)`` and its
+        ``tank_end`` value represents the DHW tank state at
+        ``horizon_start + (i+1)·h``.  Checking slot ``i`` therefore enforces
+        "tank ready at ``hh:00``" exactly.
+
+        Times that fall before the horizon start (already past) are ignored;
+        the solver will pick up tomorrow's occurrence naturally because the
+        horizon typically spans 24 h.
+
+        Example: ``horizon_start = 20:00``, ready-by ``"07:00"``
+            → slot 10 ends at 07:00 the next morning → index 10.
+        """
+        times_str: str = self.entry.data.get(CONF_DHW_READY_TIMES, "")
+        if not times_str or not times_str.strip():
+            return []
+
+        indices: list[int] = []
+        for t_str in times_str.split(","):
+            t_str = t_str.strip()
+            if not t_str:
+                continue
+            try:
+                hh, _mm = map(int, t_str.split(":"))
+            except ValueError:
+                _LOGGER.warning(
+                    "DHW ready-by: cannot parse time %r — skipping.", t_str
+                )
+                continue
+            for i in range(n_hours):
+                slot_end = horizon_start + timedelta(hours=i + 1)
+                if slot_end.hour == hh:
+                    indices.append(i)
+                    break
+            else:
+                _LOGGER.debug(
+                    "DHW ready-by: time %r not found within %d-hour horizon — "
+                    "constraint skipped for this solve.",
+                    t_str,
+                    n_hours,
+                )
+
+        result = sorted(set(indices))
+        if result:
+            _LOGGER.debug("DHW ready-by horizon indices: %s", result)
+        return result
+
+    # ------------------------------------------------------------------
     # MPC config builder
     # ------------------------------------------------------------------
 
-    def _build_mpc_config(self, k_emission: float = 0.0) -> MpcConfig:
+    def _build_mpc_config(
+        self, k_emission: float = 0.0, dhw_ready_by_hours: list[int] | None = None
+    ) -> MpcConfig:
         """Construct an ``MpcConfig`` from the config entry."""
         d = self.entry.data
         dhw_enabled = bool(d.get(CONF_DHW_ENABLED, False))
@@ -820,6 +1071,7 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
             dhw_min_temp=float(d.get(CONF_DHW_MIN_TEMP, DEFAULT_DHW_MIN_TEMP)),
             dhw_target_temp=float(d.get(CONF_DHW_TARGET_TEMP, DEFAULT_DHW_TARGET_TEMP)),
             dhw_lwt=float(d.get(CONF_DHW_LWT, DEFAULT_DHW_LWT)),
+            dhw_ready_by_hours=dhw_ready_by_hours if dhw_ready_by_hours is not None else [],
         )
 
 

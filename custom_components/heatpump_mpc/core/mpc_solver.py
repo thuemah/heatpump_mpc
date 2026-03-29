@@ -163,6 +163,13 @@ class MpcConfig:
     """Fixed leaving water temperature used when the HP runs in DHW mode (°C).
     Independent of the SH LWT optimisation — DHW always runs at this temperature."""
 
+    dhw_ready_by_hours: list[int] = field(default_factory=list)
+    """Horizon slot indices where the DHW tank must be at ≥ 90 % of its maximum
+    energy (``dhw_target_temp − dhw_min_temp``).  Computed by the coordinator
+    from user-configured HH:MM ready-by times at each solver run.  An empty
+    list disables the feature (only the never-empty depletion constraint
+    applies)."""
+
 
 @dataclass
 class HourPlan:
@@ -346,23 +353,42 @@ class MpcSolver:
 
         dhw_on = [False] * n
 
-        # Phase 1 — ensure DHW tank never empties.
-        for _ in range(n):
-            _, feasible = _dhw_simulate(dhw_on)
-            if feasible:
-                break
-            # Find first violation.
+        # Pre-compute ready-by index set and threshold energy for Phase 1.
+        ready_by_set: set[int] = set(config.dhw_ready_by_hours)
+        _READY_THRESHOLD = 0.90
+        _ready_min_energy = dhw_max_energy * _READY_THRESHOLD
+
+        def _find_first_violation(schedule: list[bool]) -> int | None:
+            """Return the earliest hour index with a constraint violation.
+
+            Two violation types are detected in a single forward pass:
+
+            * **Depletion** — ``tank_end < 0``: the tank runs dry.
+            * **Ready-by** — at a user-configured index the tank energy is
+              below 90 % of the maximum (``dhw_target_temp − dhw_min_temp``).
+
+            Returns ``None`` when the schedule satisfies all constraints.
+            """
             e = dhw_energy_init
-            violation: int | None = None
             for t in range(n):
-                if dhw_on[t]:
+                if schedule[t]:
                     headroom = max(0.0, dhw_max_energy - e)
                     e += min(dhw_cap[t], headroom)
                 e -= horizon[t].dhw_demand
                 if e < 0.0:
-                    violation = t
-                    break
+                    return t
+                if t in ready_by_set and e < _ready_min_energy:
+                    return t
                 e = max(0.0, e)
+            return None
+
+        # Phase 1 — satisfy both depletion and ready-by constraints.
+        #
+        # Each iteration finds the earliest violation and adds the cheapest
+        # available off-hour before it.  Using full rated output charges the
+        # tank as quickly as possible, minimising the number of hours booked.
+        for _ in range(n):
+            violation = _find_first_violation(dhw_on)
             if violation is None:
                 break
             candidates = [t for t in range(violation + 1) if not dhw_on[t]]

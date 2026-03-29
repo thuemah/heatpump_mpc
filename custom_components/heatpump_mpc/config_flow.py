@@ -34,6 +34,7 @@ async_create_entry(), and seeds _flow_data from the existing config entry.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import voluptuous as vol
@@ -72,11 +73,13 @@ from .const import (
     FLOW_UNIT_M3H,
     CONF_DHW_ENABLED,
     CONF_DHW_TEMP_SENSOR,
+    CONF_DHW_OPERATION_SENSOR,
     CONF_DHW_TANK_VOLUME_L,
     CONF_DHW_MIN_TEMP,
     CONF_DHW_TARGET_TEMP,
     CONF_DHW_LWT,
     CONF_DHW_DAILY_DEMAND_KWH,
+    CONF_DHW_READY_TIMES,
     DEFAULT_WEATHER_ENTITY,
 
     DEFAULT_TANK_TEMP_SENSOR,
@@ -99,6 +102,7 @@ from .const import (
     DEFAULT_DHW_TARGET_TEMP,
     DEFAULT_DHW_LWT,
     DEFAULT_DHW_DAILY_DEMAND_KWH,
+    DEFAULT_DHW_READY_TIMES,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -187,9 +191,10 @@ class HeatpumpMpcConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         # If DHW is disabled, remove DHW-specific keys.
         if not data.get(CONF_DHW_ENABLED):
-            for key in (CONF_DHW_TEMP_SENSOR, CONF_DHW_TANK_VOLUME_L,
-                        CONF_DHW_MIN_TEMP, CONF_DHW_TARGET_TEMP,
-                        CONF_DHW_LWT, CONF_DHW_DAILY_DEMAND_KWH):
+            for key in (CONF_DHW_TEMP_SENSOR, CONF_DHW_OPERATION_SENSOR,
+                        CONF_DHW_TANK_VOLUME_L, CONF_DHW_MIN_TEMP,
+                        CONF_DHW_TARGET_TEMP, CONF_DHW_LWT,
+                        CONF_DHW_DAILY_DEMAND_KWH, CONF_DHW_READY_TIMES):
                 data.pop(key, None)
 
         return data
@@ -334,6 +339,12 @@ class HeatpumpMpcConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )] = selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="sensor", device_class="temperature")
             )
+            schema[vol.Optional(
+                CONF_DHW_OPERATION_SENSOR,
+                description={"suggested_value": g(CONF_DHW_OPERATION_SENSOR)},
+            )] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="binary_sensor")
+            )
             schema[vol.Required(
                 CONF_DHW_TANK_VOLUME_L,
                 default=g(CONF_DHW_TANK_VOLUME_L, DEFAULT_DHW_TANK_VOLUME_L),
@@ -364,6 +375,10 @@ class HeatpumpMpcConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )] = selector.NumberSelector(
                 selector.NumberSelectorConfig(min=0.5, max=20.0, step=0.5, unit_of_measurement="kWh/day")
             )
+            schema[vol.Optional(
+                CONF_DHW_READY_TIMES,
+                description={"suggested_value": g(CONF_DHW_READY_TIMES, DEFAULT_DHW_READY_TIMES)},
+            )] = selector.TextSelector(selector.TextSelectorConfig())
 
         return vol.Schema(schema)
 
@@ -402,6 +417,8 @@ class HeatpumpMpcConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     # Validation
     # ------------------------------------------------------------------
 
+    _READY_TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
     def _validate_dhw(self, user_input: dict) -> dict[str, str]:
         """Validate DHW parameters when DHW is enabled."""
         errors: dict[str, str] = {}
@@ -414,6 +431,12 @@ class HeatpumpMpcConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors[CONF_DHW_TARGET_TEMP] = "dhw_target_below_min"
         if lwt < target_t:
             errors[CONF_DHW_LWT] = "dhw_lwt_below_target"
+        ready_times = user_input.get(CONF_DHW_READY_TIMES, "") or ""
+        for t_str in ready_times.split(","):
+            t_str = t_str.strip()
+            if t_str and not self._READY_TIME_RE.match(t_str):
+                errors[CONF_DHW_READY_TIMES] = "dhw_ready_times_invalid"
+                break
         return errors
 
     def _validate_heat_pump(self, user_input: dict) -> dict[str, str]:
@@ -512,7 +535,7 @@ class HeatpumpMpcConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors = self._validate_dhw(user_input)
             if not errors:
                 self._flow_data.update(user_input)
-                self._clear_absent_entity_keys(user_input, [CONF_DHW_TEMP_SENSOR])
+                self._clear_absent_entity_keys(user_input, [CONF_DHW_TEMP_SENSOR, CONF_DHW_OPERATION_SENSOR])
                 data = self._build_final_data()
                 ha_entity = data.get(CONF_HA_ENTITY_ID, "")
                 title = f"Heat Pump MPC ({ha_entity})" if ha_entity else "Heat Pump MPC"
@@ -529,17 +552,19 @@ class HeatpumpMpcConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def async_step_reconfigure(self, user_input=None) -> FlowResult:
         """Step 1 (reconfigure): data sources."""
-        entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
         if user_input is None:
+            entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
+            if entry is None:
+                return self.async_abort(reason="entry_not_found")
             self._entry = entry
             self._flow_data = {**entry.data}
-        if user_input is not None:
+        else:
             self._flow_data.update(user_input)
             self._clear_absent_entity_keys(user_input, [CONF_PRICE_SENSOR, CONF_HA_ENTITY_ID])
             return await self.async_step_reconfigure_heat_pump()
         return self.async_show_form(
             step_id="reconfigure",
-            data_schema=self._schema_data_sources(user_input, self._flow_data),
+            data_schema=self._schema_data_sources(None, self._flow_data),
         )
 
     async def async_step_reconfigure_heat_pump(self, user_input=None) -> FlowResult:
@@ -598,7 +623,7 @@ class HeatpumpMpcConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors = self._validate_dhw(user_input)
             if not errors:
                 self._flow_data.update(user_input)
-                self._clear_absent_entity_keys(user_input, [CONF_DHW_TEMP_SENSOR])
+                self._clear_absent_entity_keys(user_input, [CONF_DHW_TEMP_SENSOR, CONF_DHW_OPERATION_SENSOR])
                 return self.async_update_reload_and_abort(
                     self._entry,
                     data=self._build_final_data(),

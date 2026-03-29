@@ -1,4 +1,16 @@
 {
+  "services": {
+    "get_sh_hourly": {
+      "name": "Get SH Hourly Data",
+      "description": "Returns a rolling buffer of completed per-hour space-heating thermal energy records. Heating Analytics calls this service to retrieve actual SH energy data from the MPC. Each record contains the ISO start timestamp of the hour and the estimated SH thermal energy delivered (kWh_th), excluding DHW-mode windows.",
+      "fields": {
+        "entry_id": {
+          "name": "Config Entry ID",
+          "description": "Optional. The config entry ID of the target Heat Pump MPC instance. Required only when multiple MPC instances are installed. Leave blank to target the single installed instance."
+        }
+      }
+    }
+  },
   "config": {
     "step": {
       "user": {
@@ -161,20 +173,24 @@
         "data": {
           "dhw_enabled": "Enable DHW Scheduling",
           "dhw_temp_sensor": "DHW Tank Temperature Sensor",
+          "dhw_operation_sensor": "DHW Operation Sensor (optional)",
           "dhw_tank_volume_liters": "DHW Tank Volume",
           "dhw_min_temp": "DHW Minimum Temperature",
           "dhw_target_temp": "DHW Target Temperature",
           "dhw_lwt": "DHW Leaving Water Temperature",
-          "dhw_daily_demand_kwh": "Daily DHW Demand"
+          "dhw_daily_demand_kwh": "Daily DHW Demand",
+          "dhw_ready_times": "\"Ready by\" Times"
         },
         "data_description": {
           "dhw_enabled": "Enable DHW tank scheduling and COP contamination filtering.",
           "dhw_temp_sensor": "Sensor reporting the current temperature of the DHW tank. Used to initialise the tank model and to detect when the heat pump is running in DHW mode (COP filter).",
+          "dhw_operation_sensor": "Optional. A binary sensor that reads On when the heat pump is actively heating the DHW tank (e.g. a mode or status sensor from the heat pump integration). When configured, this is used as the primary DHW contamination signal for COP learning — more reliable than temperature-rise detection, especially when the tank is near its target temperature. Leave blank to use the temperature-rise fallback only.",
           "dhw_tank_volume_liters": "Volume of your DHW storage tank in litres.",
           "dhw_min_temp": "Temperature below which the DHW tank is considered depleted and reheating is mandatory. Typically 40–45 °C.",
           "dhw_target_temp": "Temperature the heat pump heats the DHW tank to. Typically 55 °C.",
           "dhw_lwt": "Fixed flow temperature used when the heat pump runs in DHW mode. Must be at least as high as the target temperature. Typically 55–60 °C.",
-          "dhw_daily_demand_kwh": "Estimated thermal energy drawn from the DHW tank per day (kWh). Typical household: 2–5 kWh/day. Distributed evenly over 24 hours for planning."
+          "dhw_daily_demand_kwh": "Estimated thermal energy drawn from the DHW tank per day (kWh). Typical household: 2–5 kWh/day. Distributed evenly over 24 hours for planning.",
+          "dhw_ready_times": "Optional. One or more times when the DHW tank must be fully heated, as comma-separated HH:MM values (24-hour clock). Example: 07:00, 18:00. The scheduler treats these as hard constraints and ensures the tank reaches ≥ 90 % of its target temperature by each listed time, choosing the cheapest hours to heat. Leave blank to rely only on the never-empty constraint."
         }
       },
       "reconfigure_dhw": {
@@ -183,20 +199,24 @@
         "data": {
           "dhw_enabled": "Enable DHW Scheduling",
           "dhw_temp_sensor": "DHW Tank Temperature Sensor",
+          "dhw_operation_sensor": "DHW Operation Sensor (optional)",
           "dhw_tank_volume_liters": "DHW Tank Volume",
           "dhw_min_temp": "DHW Minimum Temperature",
           "dhw_target_temp": "DHW Target Temperature",
           "dhw_lwt": "DHW Leaving Water Temperature",
-          "dhw_daily_demand_kwh": "Daily DHW Demand"
+          "dhw_daily_demand_kwh": "Daily DHW Demand",
+          "dhw_ready_times": "\"Ready by\" Times"
         },
         "data_description": {
           "dhw_enabled": "Enable DHW tank scheduling and COP contamination filtering.",
           "dhw_temp_sensor": "Sensor reporting the current temperature of the DHW tank.",
+          "dhw_operation_sensor": "Optional. Binary sensor that reads On when the HP is heating DHW. Leave blank to use temperature-rise detection only.",
           "dhw_tank_volume_liters": "Volume of your DHW storage tank in litres.",
           "dhw_min_temp": "Temperature below which the DHW tank is considered depleted.",
           "dhw_target_temp": "Temperature the heat pump heats the DHW tank to.",
           "dhw_lwt": "Fixed flow temperature used when the heat pump runs in DHW mode.",
-          "dhw_daily_demand_kwh": "Estimated thermal energy drawn from the DHW tank per day (kWh)."
+          "dhw_daily_demand_kwh": "Estimated thermal energy drawn from the DHW tank per day (kWh).",
+          "dhw_ready_times": "Optional. Comma-separated HH:MM times when the tank must be ready (e.g. 07:00, 18:00). Leave blank to disable."
         }
       }
     },
@@ -206,10 +226,12 @@
       "lwt_mild_above_cold": "Mild-weather flow temperature must be lower than the cold-weather flow temperature.",
       "min_output_above_max": "Minimum output must be strictly lower than the nominal full-load output.",
       "dhw_target_below_min": "DHW target temperature must be higher than the minimum temperature.",
-      "dhw_lwt_below_target": "DHW leaving water temperature must be at least as high as the target temperature."
+      "dhw_lwt_below_target": "DHW leaving water temperature must be at least as high as the target temperature.",
+      "dhw_ready_times_invalid": "Invalid format. Use comma-separated HH:MM values in 24-hour clock, e.g. 07:00, 18:00."
     },
     "abort": {
-      "already_configured": "This integration instance is already configured."
+      "already_configured": "This integration instance is already configured.",
+      "entry_not_found": "The config entry could not be found. It may have been deleted while the dialog was open."
     }
   }
 }

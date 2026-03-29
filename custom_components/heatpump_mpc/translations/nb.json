@@ -165,20 +165,24 @@
         "data": {
           "dhw_enabled": "Aktiver VV-planlegging",
           "dhw_temp_sensor": "Temperatursensor for varmtvannstank",
+          "dhw_operation_sensor": "VV-driftssensor (valgfri)",
           "dhw_tank_volume_liters": "Varmtvannstankens volum",
           "dhw_min_temp": "Minimumstemperatur for varmtvann",
           "dhw_target_temp": "M\u00e5ltemperatur for varmtvann",
           "dhw_lwt": "Turtemperatur for varmtvannsmodus",
-          "dhw_daily_demand_kwh": "Daglig varmtvannsbehov"
+          "dhw_daily_demand_kwh": "Daglig varmtvannsbehov",
+          "dhw_ready_times": "\u00abKlar innen\u00bb-tidspunkter"
         },
         "data_description": {
           "dhw_enabled": "Aktiver planlegging av varmtvannstank og COP-kontamineringsfilter.",
           "dhw_temp_sensor": "Sensor som rapporterer gjeldende temperatur i varmtvannstanken. Brukes til \u00e5 initialisere tankmodellen og oppdage n\u00e5r varmepumpen kj\u00f8rer i varmtvannsmodus (COP-filter).",
+          "dhw_operation_sensor": "Valgfritt. En bin\u00e6r sensor som leser P\u00e5 n\u00e5r varmepumpen aktivt varmer varmtvannstanken (f.eks. en modus- eller statussensor fra varmepumpeintegrasjonen). N\u00e5r konfigurert brukes denne som prim\u00e6rt COP-kontamineringssignal \u2014 mer p\u00e5litelig enn temperaturstigning, s\u00e6rlig n\u00e5r tanken er n\u00e6r m\u00e5ltemperaturen. La feltet st\u00e5 tomt for \u00e5 bare bruke temperaturstigning.",
           "dhw_tank_volume_liters": "Volum p\u00e5 varmtvannstanken i liter.",
           "dhw_min_temp": "Temperatur under hvilken varmtvannstanken anses som tom og oppvarming er p\u00e5krevd. Typisk 40\u201345 \u00b0C.",
           "dhw_target_temp": "Temperaturen varmepumpen varmer varmtvannstanken til. Typisk 55 \u00b0C.",
           "dhw_lwt": "Fast turtemperatur som brukes n\u00e5r varmepumpen kj\u00f8rer i varmtvannsmodus. M\u00e5 v\u00e6re minst like h\u00f8y som m\u00e5ltemperaturen. Typisk 55\u201360 \u00b0C.",
-          "dhw_daily_demand_kwh": "Estimert termisk energi trukket fra varmtvannstanken per dag (kWh). Typisk husstand: 2\u20135 kWh/dag. Fordeles jevnt over 24 timer for planlegging."
+          "dhw_daily_demand_kwh": "Estimert termisk energi trukket fra varmtvannstanken per dag (kWh). Typisk husstand: 2\u20135 kWh/dag. Fordeles jevnt over 24 timer for planlegging.",
+          "dhw_ready_times": "Valgfritt. Ett eller flere tidspunkter (kommaseparerte, format TT:MM p\u00e5 24-timers klokke) n\u00e5r varmtvannstanken m\u00e5 v\u00e6re oppvarmt. Eksempel: 07:00, 18:00. Planleggeren bruker dette som et hardt krav og sikrer at tanken er \u2265\u00a090\u00a0% av m\u00e5ltemperaturen innen hvert tidspunkt. La feltet st\u00e5 tomt for \u00e5 bare bruke \u00abaldri-tom\u00bb-kravet."
         }
       },
       "reconfigure_dhw": {
@@ -187,20 +191,25 @@
         "data": {
           "dhw_enabled": "Aktiver VV-planlegging",
           "dhw_temp_sensor": "Temperatursensor for varmtvannstank",
+          "dhw_operation_sensor": "VV-driftssensor (valgfri)",
           "dhw_tank_volume_liters": "Varmtvannstankens volum",
           "dhw_min_temp": "Minimumstemperatur for varmtvann",
           "dhw_target_temp": "M\u00e5ltemperatur for varmtvann",
           "dhw_lwt": "Turtemperatur for varmtvannsmodus",
-          "dhw_daily_demand_kwh": "Daglig varmtvannsbehov"
+          "dhw_daily_demand_kwh": "Daglig varmtvannsbehov",
+          "dhw_ready_times": "\u00abKlar innen\u00bb-tidspunkter",
+          "dhw_operation_sensor": "VV-driftssensor (valgfri)"
         },
         "data_description": {
           "dhw_enabled": "Aktiver planlegging av varmtvannstank og COP-kontamineringsfilter.",
           "dhw_temp_sensor": "Sensor som rapporterer gjeldende temperatur i varmtvannstanken.",
+          "dhw_operation_sensor": "Valgfritt. Bin\u00e6r sensor som leser P\u00e5 n\u00e5r varmepumpen varmer varmtvann. La feltet st\u00e5 tomt for \u00e5 bare bruke temperaturstigning.",
           "dhw_tank_volume_liters": "Volum p\u00e5 varmtvannstanken i liter.",
           "dhw_min_temp": "Temperatur under hvilken varmtvannstanken anses som tom.",
           "dhw_target_temp": "Temperaturen varmepumpen varmer varmtvannstanken til.",
           "dhw_lwt": "Fast turtemperatur som brukes n\u00e5r varmepumpen kj\u00f8rer i varmtvannsmodus.",
-          "dhw_daily_demand_kwh": "Estimert termisk energi trukket fra varmtvannstanken per dag (kWh)."
+          "dhw_daily_demand_kwh": "Estimert termisk energi trukket fra varmtvannstanken per dag (kWh).",
+          "dhw_ready_times": "Valgfritt. Kommaseparerte TT:MM-tidspunkter n\u00e5r tanken m\u00e5 v\u00e6re klar (f.eks. 07:00, 18:00). La feltet st\u00e5 tomt for \u00e5 deaktivere."
         }
       }
     },
@@ -210,10 +219,12 @@
       "lwt_mild_above_cold": "Turtemperatur ved mildt v\u00e6r m\u00e5 v\u00e6re lavere enn turtemperatur ved kaldt v\u00e6r.",
       "min_output_above_max": "Minimum termisk effekt m\u00e5 v\u00e6re strengt lavere enn nominell full-last-effekt.",
       "dhw_target_below_min": "VV-m\u00e5ltemperatur m\u00e5 v\u00e6re h\u00f8yere enn minimumstemperaturen.",
-      "dhw_lwt_below_target": "Turtemperatur for varmtvannsmodus m\u00e5 v\u00e6re minst like h\u00f8y som m\u00e5ltemperaturen."
+      "dhw_lwt_below_target": "Turtemperatur for varmtvannsmodus m\u00e5 v\u00e6re minst like h\u00f8y som m\u00e5ltemperaturen.",
+      "dhw_ready_times_invalid": "Ugyldig format. Bruk kommaseparerte TT:MM-verdier p\u00e5 24-timers klokke, f.eks. 07:00, 18:00."
     },
     "abort": {
-      "already_configured": "Denne integrasjonsinstansen er allerede konfigurert."
+      "already_configured": "Denne integrasjonsinstansen er allerede konfigurert.",
+      "entry_not_found": "Konfigurasjonsoppf\u00f8ringen ble ikke funnet. Den kan ha blitt slettet mens dialogen var \u00e5pen."
     }
   }
 }

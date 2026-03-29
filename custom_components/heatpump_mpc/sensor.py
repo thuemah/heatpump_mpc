@@ -30,7 +30,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EntityCategory, UnitOfTemperature
+from homeassistant.const import EntityCategory, UnitOfEnergy, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceEntryType
 from homeassistant.helpers.entity import DeviceInfo
@@ -49,6 +49,7 @@ from .const import (
     RESULT_PLANNED_STARTS,
     RESULT_PLANNED_KWH_THERMAL,
     RESULT_PLANNED_KWH_ELECTRICAL,
+    RESULT_SH_THERMAL_ENERGY_TOTAL_KWH,
 )
 from .coordinator import HeatpumpMpcCoordinator
 
@@ -70,6 +71,7 @@ async def async_setup_entry(
             EstimatedCopSensor(coordinator, entry),
             TotalCostSensor(coordinator, entry),
             NextRunStartSensor(coordinator, entry),
+            ShThermalEnergySensor(coordinator, entry),
         ]
     )
 
@@ -266,3 +268,40 @@ class NextRunStartSensor(MpcBaseSensor):
             return None
         from homeassistant.util import dt as dt_util
         return dt_util.parse_datetime(v)
+
+
+class ShThermalEnergySensor(MpcBaseSensor):
+    """
+    Cumulative space-heating thermal energy delivered by the heat pump (kWh_th).
+
+    Reported as a ``total_increasing`` sensor so Home Assistant — and any
+    integration that subscribes to this entity — can derive hourly deltas by
+    comparing successive state values.  DHW-mode windows are excluded; only
+    energy attributed to space heating is accumulated.
+
+    The value persists across HA restarts via the integration's storage layer
+    so the counter never resets to zero on reload.
+
+    Heating Analytics uses the ``heatpump_mpc.get_sh_hourly`` service to pull
+    completed-hour records directly; this sensor serves as a real-time
+    cross-check and for use in HA energy dashboards.
+    """
+
+    def __init__(
+        self, coordinator: HeatpumpMpcCoordinator, entry: ConfigEntry
+    ) -> None:
+        super().__init__(
+            coordinator,
+            entry,
+            RESULT_SH_THERMAL_ENERGY_TOTAL_KWH,
+            "SH Thermal Energy",
+        )
+        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+        self._attr_device_class = SensorDeviceClass.ENERGY
+        self._attr_state_class = SensorStateClass.TOTAL_INCREASING
+        self._attr_icon = "mdi:heat-pump"
+
+    @property
+    def native_value(self) -> float | None:
+        v = self._value
+        return round(float(v), 4) if v is not None else None

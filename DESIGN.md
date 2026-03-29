@@ -18,7 +18,7 @@ output and makes control decisions based on cost and efficiency.
 - Two-mass thermal buffer simulation (building demand + 300 L tank)
 - Cost-optimal scheduling over a 12–48 h horizon
 - Runtime η-learning from real measurements (EMA on Carnot efficiency)
-- Capacity learning from compressor frequency (Modbus)
+- Capacity learning from implicit full load observations
 - Persistent storage of all learned parameters across HA restarts
 - Multi-instance support (one coordinator per config entry)
 
@@ -49,7 +49,6 @@ Learning sensors (optional, all from Modbus or heat meter):
   Electrical energy sensor →  cumulative kWh     (delta = consumption/interval)
   Thermal power sensor     →  instantaneous kW   (Track A)
   Flow + ΔT sensors        →  P = Q × ΔT × 1.163 (Track B, alt. to Track A)
-  Compressor freq sensor   →  Hz                 (enables capacity learning)
 
 ─────────────────────────────────────────────────────────────────────────────
 Heat Pump MPC (this integration)
@@ -71,6 +70,8 @@ Outputs (HA entities)
   sensor.next_run_start             (timestamp)
   binary_sensor.pump_on_now         (boolean)
   binary_sensor.schedule_feasible   (problem device class, True = infeasible)
+  binary_sensor.dhw_on_now          (boolean)
+  number.dhw_setpoint               (°C)
 ```
 
 ---
@@ -157,14 +158,14 @@ and −15°C replace the static estimates once reliable (≥ 5 samples each).
 
 ## MPC Solver (`core/mpc_solver.py`)
 
-### Two-mass buffer model
+### Buffer Models
 
 **Mass 1 — Building demand**
 Consumed from Heating Analytics `get_forecast`. The building requires
 `house_demand[t]` kWh in hour `t` to maintain the comfort band. This
 integration does not model the building; it treats demand as a given input.
 
-**Mass 2 — 300 L buffer tank**
+**Mass 2 — Space Heating Buffer Tank**
 The tank acts as a fast thermal battery between the heat pump and the
 building's shunt circuit.
 
@@ -180,6 +181,15 @@ building's shunt circuit.
 - **Comfort constraint**: `tank_energy[t] ≥ 0` in every hour (tank never depleted)
 - **Safety constraint**: tank temperature ≤ `max_tank_temp`
 - **Charging ceiling constraint**: tank temperature ≤ `LWT`. The pump cannot charge a tank that is already at or above the current flow temperature, as heat only flows from hot to cold. This prevents the solver from accumulating a high buffer temperature in the tank while running at an artificially low and efficient LWT.
+
+**Mass 3 — DHW (Domestic Hot Water) Tank (Optional)**
+If `dhw_enabled` is True, an additional DHW tank model is considered.
+
+- Capacity: 180 L × 1.16 Wh/(L·K) (configurable)
+- A daily demand `dhw_daily_demand_kwh` is divided by 24 and drawn each hour.
+- **Constraints:** The tank must never be depleted below `dhw_min_temp`.
+- **Ready-by Constraint:** Optional user-defined hours where the tank must be at ≥ 90% capacity.
+- **Mutual Exclusivity:** DHW and SH modes are mutually exclusive. DHW is scheduled first, greedily claiming the cheapest hours to satisfy its constraints. Hours assigned to DHW are blocked from SH scheduling.
 
 ### Decision variables
 
@@ -302,20 +312,15 @@ duration < 15 min, heat < 0.05 kWh, or electrical energy ≤ 0.
 
 The η_Carnot estimate is considered reliable after 20 clean-condition samples.
 
-### Capacity learning — compressor frequency
+### Capacity learning — implicit full load
+
+**COP Contamination Filter**: When learning COP, it is crucial to filter out observations from DHW cycles or defrosts, as they distort the SH COP curve. `CONF_DHW_OPERATION_SENSOR` provides a direct signal indicating when the HP is actively heating the DHW tank. If not available, a temperature-rise heuristic on `CONF_DHW_TEMP_SENSOR` serves as a fallback.
 
 **The observability problem**: observed thermal output is ambiguous — we
 cannot tell whether the pump was running at maximum or modulated down.
 
-**Solution**: compressor frequency from Modbus resolves this. When
-`freq_hz ≥ 0.95 × max_observed_freq_hz`, the pump is capacity-limited,
-and `heat_out_kW / rated_kW` is a direct measurement of the capacity
-fraction at the current outdoor temperature.
-
-**Self-calibrating reference**: `max_observed_freq_hz` is a rolling maximum
-over all frequency observations. Capacity learning only activates after
-30 frequency observations (≈ 2–3 weeks of heating season runtime) to
-ensure the reference has converged.
+**Solution**: The MPC knows when it commands full output (`is_full_load`).
+If the pump is commanded to run at full load, and the tank has enough headroom (`tank_headroom_kwh`) to absorb more heat than was delivered, then the tank was not the limiting factor. In this case, `heat_out_kW / rated_kW` is a direct measurement of the capacity fraction at the current outdoor temperature. This implicitly replaces the need for a compressor frequency sensor.
 
 **Temperature anchors**: Observations are binned to the nearest anchor
 (−15°C or −7°C, within ±6°C). Each anchor uses EMA (α = 0.03 — very slow,
@@ -341,8 +346,6 @@ Stored as `.storage/heatpump_mpc.<entry_id>` (schema v1):
     "capacity_frac_minus7": 0.763,
     "capacity_minus15_samples": 12,
     "capacity_minus7_samples": 31,
-    "max_observed_freq_hz": 118.5,
-    "freq_obs_count": 847,
     "eta_carnot_samples": 203,
     "f_defrost_samples": 61
   }
@@ -368,7 +371,6 @@ Runs every 30 minutes as a `DataUpdateCoordinator`.
 6. Run learning pipeline (`_learn_from_sensors`):
    - Compute electrical energy delta since last update
    - Read thermal power (Track A or B)
-   - Read compressor frequency
    - Submit `CopObservation` to `CopLearner`
    - Save learner state to storage (debounced)
 7. Apply learned capacity anchors to `HeatPumpModel`
@@ -402,7 +404,6 @@ Runs every 30 minutes as a `DataUpdateCoordinator`.
 |-----------|-------------|
 | Electrical energy sensor | Cumulative kWh on heat pump supply |
 | Thermal power sensor *(Track A)* | Instantaneous kW from heat meter |
-| Compressor frequency sensor *(optional)* | Hz from Modbus; enables capacity learning |
 | Use flow sensors *(Track B toggle)* | Derive power from flow × ΔT instead |
 | Flow rate sensor | L/min or m³/h |
 | Supply temp sensor | Water temp leaving the heat pump |
@@ -415,6 +416,19 @@ Runs every 30 minutes as a `DataUpdateCoordinator`.
 | LWT step | 5°C | Granularity of flow temperature candidates |
 | Tank standby loss | 0.05 kWh/h | Insulation loss from the buffer tank |
 
+### Step 5 — DHW Scheduling (Optional)
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| DHW enabled | False | Toggle for DHW features |
+| DHW temp sensor | — | Current DHW tank temperature |
+| DHW operation sensor | — | Binary sensor indicating active DHW mode (for COP filtering) |
+| DHW tank volume | 180 L | Used to compute thermal capacity |
+| DHW min temp | 40°C | DHW tank reheating threshold |
+| DHW target temp | 55°C | Temperature HP heats DHW tank to |
+| DHW LWT | 55°C | Fixed LWT used during DHW mode |
+| DHW daily demand | 3.5 kWh | Total daily thermal demand |
+| DHW ready times | — | Hours where DHW must be at 90% capacity (e.g. `07:00`) |
+
 ---
 
 ## Entities
@@ -422,12 +436,14 @@ Runs every 30 minutes as a `DataUpdateCoordinator`.
 | Entity | Type | Description |
 |--------|------|-------------|
 | `number.lwt_setpoint` | °C | LWT setpoint that tracks the solver recommendation; writable for manual override (reset on next coordinator update) |
+| `number.dhw_setpoint` | °C | Recommended DHW target temperature |
 | `sensor.optimal_flow_temp` | °C | Read-only mirror of the solver's recommended LWT; `schedule` attribute has full per-hour plan |
 | `sensor.optimal_output` | kW | Inverter output level for the current hour (hour 0 of the optimal schedule) |
 | `sensor.estimated_cop` | — | Effective COP for the current hour |
 | `sensor.projected_heating_cost` | currency | Total cost over horizon |
 | `sensor.next_run_start` | timestamp | Next scheduled pump-on hour |
-| `binary_sensor.pump_on_now` | boolean | Whether the current hour is scheduled on |
+| `binary_sensor.pump_on_now` | boolean | Whether the current hour is scheduled for Space Heating |
+| `binary_sensor.dhw_on_now` | boolean | Whether the current hour is scheduled for DHW |
 | `binary_sensor.schedule_feasible` | problem | `on` = infeasible (tank cannot meet demand) |
 
 Modbus setpoint writing is handled by a separate HA automation that reads
@@ -462,11 +478,8 @@ custom_components/heatpump_mpc/
 
 - **Actual Sprsun R290 capacity table** — full heating output vs outdoor
   temperature from the datasheet (not just COP data). The current capacity
-  prior at −7°C and −15°C are estimates; compressor frequency learning will
+  prior at −7°C and −15°C are estimates; implicit capacity learning will
   replace them over time.
-- **Compressor frequency as current proxy** — for pumps that expose inverter
-  current (A) but not frequency (Hz), high current can serve as a proxy for
-  maximum capacity detection. Threshold calibration needed.
 - **Price sensor** — currently optional. When absent, uniform price = 1.0
   is used so the solver optimises purely for efficiency (lowest kWh consumed).
   With a Nordpool/Tibber sensor connected, the solver additionally shifts

@@ -4,16 +4,18 @@ Persistent storage for Heat Pump MPC learned state.
 Uses ``homeassistant.helpers.storage.Store`` to write a JSON file under
 ``.storage/heatpump_mpc.<entry_id>`` that survives HA restarts.
 
-Only the learned COP / capacity parameters need persistence — all other
-coordinator state is rebuilt from live sensor readings on every update.
-
 Schema
 ------
 Version 1::
 
     {
-        "learner": { ...CopLearnerState.to_dict()... }
+        "learner": { ...CopLearnerState.to_dict()... },
+        "sh_total_kwh_th": <float>,
+        "sh_hourly_buffer": [{"datetime": "<ISO>", "kwh_th_sh": <float>}, ...]
     }
+
+The ``sh_*`` keys are optional for backward compatibility — missing keys are
+treated as zeros / empty lists so existing stores migrate silently.
 
 Upgrading
 ---------
@@ -123,15 +125,81 @@ class HeatpumpMpcStorage:
             )
             return CopLearnerState()
 
+    async def async_load_sh_state(self) -> tuple[float, list[dict]]:
+        """
+        Load persisted SH thermal energy state from disk.
+
+        Returns ``(0.0, [])`` when no data has been saved yet or when the
+        stored data is unreadable.  Missing ``sh_*`` keys in older stores are
+        treated as a cold start (zero total, empty buffer).
+        """
+        try:
+            raw: dict | None = await self._store.async_load()
+        except Exception as err:
+            _LOGGER.warning("Failed to load SH state: %s — cold-starting.", err)
+            return 0.0, []
+
+        if raw is None:
+            return 0.0, []
+
+        version = raw.get("version", 1)
+        if version != STORAGE_VERSION:
+            return 0.0, []
+
+        total = raw.get("sh_total_kwh_th", 0.0)
+        buffer = raw.get("sh_hourly_buffer", [])
+
+        try:
+            total = float(total)
+        except (TypeError, ValueError):
+            total = 0.0
+
+        if not isinstance(buffer, list):
+            buffer = []
+
+        _LOGGER.debug(
+            "Loaded SH state: total=%.3f kWh_th, buffer=%d entries.",
+            total,
+            len(buffer),
+        )
+        return total, buffer
+
     async def async_save_learner_state(self, state: CopLearnerState) -> None:
         """
         Persist the current learner state to disk (debounced).
 
         Uses ``async_delay_save`` so rapid successive calls coalesce into a
         single write after ``_SAVE_DELAY_S`` seconds.
+
+        .. deprecated::
+            Prefer :py:meth:`schedule_full_save` which also persists SH state.
         """
         data = {
             "version": STORAGE_VERSION,
             "learner": state.to_dict(),
         }
         self._store.async_delay_save(lambda: data, _SAVE_DELAY_S)
+
+    def schedule_full_save(
+        self,
+        learner_state: CopLearnerState,
+        sh_total_kwh_th: float,
+        sh_hourly_buffer: list[dict],
+    ) -> None:
+        """
+        Schedule a debounced write of all persistent state (sync, safe to call
+        from synchronous code inside the event loop).
+
+        Combines learner parameters and SH hourly buffer into one write.
+        Rapid successive calls coalesce into a single disk write after
+        ``_SAVE_DELAY_S`` seconds.
+        """
+        # Capture values in a local dict so the lambda does not close over
+        # mutable references that could change before the write fires.
+        snapshot = {
+            "version": STORAGE_VERSION,
+            "learner": learner_state.to_dict(),
+            "sh_total_kwh_th": sh_total_kwh_th,
+            "sh_hourly_buffer": list(sh_hourly_buffer),
+        }
+        self._store.async_delay_save(lambda: snapshot, _SAVE_DELAY_S)

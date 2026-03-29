@@ -20,6 +20,7 @@ These are the physical constraints of your system:
 *   **Nominal and Minimum Output (kW):** How much heat the heat pump provides at full throttle, and how low it can modulate down. The integration will evaluate both to find the cheapest option.
 *   **Leaving Water Temperature (LWT) Constraints:** Absolute minimum and maximum temperature the water from the heat pump can have.
 *   **Buffer Tank Volume:** The size of your tank in liters. This acts as a thermal battery. The integration can heat the tank extra before the electricity price goes up, as long as it does not exceed the **tank's safety ceiling**.
+*   **DHW (Domestic Hot Water) Tank:** If your heat pump also heats tap water, you can define a DHW tank. The integration can schedule DHW runs during cheap hours, avoiding periods where electricity is expensive, while ensuring the tank never falls below a minimum temperature. You can also specify "ready-by" times for when the tank must be fully heated.
 *   **Heating Curve and Room Temperature:** By setting the desired temperature at -10 °C and +10 °C outside, the system understands how hot the water needs to be to keep the house at the desired indoor temperature. This prevents the integration from choosing an unrealistically low and efficient temperature that cannot heat the house.
 
 ### 3. COP Learning & Calibration
@@ -44,14 +45,17 @@ The MPC calculates the optimal leaving water temperature (LWT) setpoint and outp
 | `number.heat_pump_mpc_lwt_setpoint` | Recommended flow temperature (°C) |
 | `sensor.heat_pump_mpc_optimal_output_kw` | Recommended output level (kW) |
 | `binary_sensor.heat_pump_mpc_pump_on` | Whether the pump should run this hour |
+| `binary_sensor.heat_pump_mpc_dhw_mode_on` | Whether the pump should run in DHW mode this hour |
+| `number.heat_pump_mpc_dhw_setpoint` | Recommended DHW setpoint (°C) |
 
 **You are responsible for building the control layer** that reads these entities and writes to your heat pump. This is intentional: heat pump interfaces vary wildly (Modbus RTU/TCP, proprietary APIs, climate entities, ESPAltherma, etc.), and blindly writing setpoints without understanding your specific unit's safety mechanisms can trigger fault codes or lockouts.
 
 ### Recommended approach
 
-1. Read `binary_sensor.heat_pump_mpc_pump_on` to decide whether to enable the pump.
-2. Read `number.heat_pump_mpc_lwt_setpoint` and write it to your pump's flow temperature setpoint *only when the value is within your pump's safe operating range*.
-3. Always implement a **safety clamp** in your automation: never write a value outside the bounds you have verified are safe for your specific installation (mixing valves, underfloor heating limits, DHW priority, etc.).
-4. Do not write setpoints during DHW or defrost cycles — let the pump manage those itself.
+1. Read `binary_sensor.heat_pump_mpc_pump_on` and `binary_sensor.heat_pump_mpc_dhw_mode_on` to decide whether to enable the pump and which mode it should be in.
+2. If DHW mode is on, write `number.heat_pump_mpc_dhw_setpoint` to the heat pump's DHW setpoint. (When DHW is not scheduled, writing the lower setpoint blocks unsolicited reheating).
+3. If SH (Space Heating) mode is on, read `number.heat_pump_mpc_lwt_setpoint` and write it to your pump's flow temperature setpoint *only when the value is within your pump's safe operating range*.
+4. Always implement a **safety clamp** in your automation: never write a value outside the bounds you have verified are safe for your specific installation (mixing valves, underfloor heating limits, DHW priority, etc.).
+5. Do not write setpoints during defrost cycles — let the pump manage those itself.
 
 The integration runs every 30 minutes. A simple HA automation triggered on state change of the relevant entities is sufficient for most setups.

@@ -101,6 +101,12 @@ CONF_DHW_TEMP_SENSOR = "dhw_temp_sensor"
 """Sensor reporting current DHW tank temperature (°C).
 Used for the COP-contamination filter and to initialise the DHW tank model."""
 
+CONF_DHW_OPERATION_SENSOR = "dhw_operation_sensor"
+"""Binary sensor that reads ``on`` when the heat pump is actively heating the
+DHW tank.  When configured, used as the primary signal for the COP
+contamination filter — more reliable than the temperature-rise fallback because
+it detects DHW mode even when the tank is already near target temperature."""
+
 CONF_DHW_TANK_VOLUME_L = "dhw_tank_volume_liters"
 """DHW tank volume (litres). Default: 180 L."""
 
@@ -118,6 +124,12 @@ dhw_target_temp. Default: 55 °C."""
 CONF_DHW_DAILY_DEMAND_KWH = "dhw_daily_demand_kwh"
 """Estimated total thermal energy drawn from the DHW tank per day (kWh_th).
 Distributed uniformly over 24 h for horizon planning. Default: 3.5 kWh."""
+
+CONF_DHW_READY_TIMES = "dhw_ready_times"
+"""Comma-separated HH:MM strings specifying when the DHW tank must be fully
+heated (e.g. ``07:00, 18:00``).  At each listed time the scheduler enforces a
+hard constraint that the tank is at ≥ 90 % of its target energy.
+Leave blank to disable (only the never-empty constraint applies)."""
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -150,6 +162,7 @@ DEFAULT_DHW_TARGET_TEMP = 55.0        # °C — HP heats DHW tank to this temper
 DEFAULT_DHW_LWT = 55.0                # °C — fixed LWT during DHW mode
 DEFAULT_DHW_DAILY_DEMAND_KWH = 3.5    # kWh_th per day
 DEFAULT_DHW_TANK_TEMP = 50.0          # °C — fallback when DHW sensor is unavailable
+DEFAULT_DHW_READY_TIMES = ""          # empty = no ready-by constraints
 
 # Heating curve reference outdoor temperatures (fixed, not user-configurable)
 HEATING_CURVE_T_COLD: float = -10.0   # °C — design cold point
@@ -219,3 +232,16 @@ Equal to dhw_target_temp when DHW is scheduled; dhw_min_temp - 1 otherwise."""
 
 RESULT_DHW_PLANNED_HOURS = "dhw_planned_hours"
 """Number of DHW-mode hours scheduled in the current horizon."""
+
+RESULT_SH_THERMAL_ENERGY_TOTAL_KWH = "sh_thermal_energy_total_kwh"
+"""Cumulative space-heating thermal energy delivered since integration startup (kWh_th).
+Monotonically increasing; exposed as a ``total_increasing`` energy sensor so
+Heating Analytics can derive an hourly delta by comparing successive values."""
+
+# ---------------------------------------------------------------------------
+# Service names
+# ---------------------------------------------------------------------------
+
+SERVICE_GET_SH_HOURLY = "get_sh_hourly"
+"""Service that returns a rolling buffer of completed per-hour SH thermal energy
+records.  Heating Analytics calls this to retrieve actual COP/energy data."""

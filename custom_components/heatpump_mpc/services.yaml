@@ -1,0 +1,20 @@
+get_sh_hourly:
+  name: Get SH Hourly Data
+  description: >
+    Returns a rolling buffer of completed per-hour space-heating thermal energy
+    records. Heating Analytics calls this service to retrieve actual SH energy
+    data from the MPC. Each record contains the ISO start timestamp of the hour,
+    estimated SH thermal energy (kwh_th_sh), electrical energy consumed during
+    SH windows (kwh_el_sh), and a mode field ("sh" | "dhw" | "off") indicating
+    which operating mode dominated the hour.
+  fields:
+    entry_id:
+      name: Config Entry ID
+      description: >
+        Optional. The config entry ID of the target Heat Pump MPC instance.
+        Required only when multiple MPC instances are installed. Leave blank
+        to target the single installed instance.
+      required: false
+      example: "abc123def456"
+      selector:
+        text:
