@@ -54,6 +54,7 @@ from .const import (
     CONF_MAX_TANK_TEMP,
     CONF_HEAT_PUMP_OUTPUT_KW,
     CONF_MIN_OUTPUT_KW,
+    CONF_RATED_MAX_ELEC_KW,
     CONF_TANK_VOLUME_L,
     CONF_LWT_STEP,
     CONF_TANK_STANDBY_LOSS_KWH,
@@ -88,6 +89,7 @@ from .const import (
     DEFAULT_MAX_TANK_TEMP,
     DEFAULT_HEAT_PUMP_OUTPUT_KW,
     DEFAULT_MIN_OUTPUT_KW,
+    DEFAULT_RATED_MAX_ELEC_KW,
     DEFAULT_TANK_VOLUME_L,
     DEFAULT_LWT_STEP,
     DEFAULT_TANK_STANDBY_LOSS_KWH,
@@ -237,6 +239,9 @@ class HeatpumpMpcConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ),
             vol.Required(CONF_MIN_OUTPUT_KW, default=g(CONF_MIN_OUTPUT_KW, DEFAULT_MIN_OUTPUT_KW)): selector.NumberSelector(
                 selector.NumberSelectorConfig(min=0.5, max=30.0, step=0.1, unit_of_measurement="kW")
+            ),
+            vol.Required(CONF_RATED_MAX_ELEC_KW, default=g(CONF_RATED_MAX_ELEC_KW, DEFAULT_RATED_MAX_ELEC_KW)): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=0.5, max=15.0, step=0.1, unit_of_measurement="kW")
             ),
             vol.Required(CONF_MIN_LWT, default=g(CONF_MIN_LWT, DEFAULT_MIN_LWT)): selector.NumberSelector(
                 selector.NumberSelectorConfig(min=20.0, max=50.0, step=0.1, unit_of_measurement="°C")

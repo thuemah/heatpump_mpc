@@ -41,7 +41,8 @@
           "tank_volume_liters": "Buffer Tank Volume",
           "lwt_heating_cold": "Heating Curve: Flow at \u221210 \u00b0C",
           "lwt_heating_mild": "Heating Curve: Flow at +10 \u00b0C",
-          "t_room": "Indoor Comfort Temperature"
+          "t_room": "Indoor Comfort Temperature",
+          "rated_max_elec_kw": "Rated Max Electrical Power"
         },
         "data_description": {
           "heat_pump_output_kw": "Rated heating capacity at full inverter load in kW (check your datasheet).",
@@ -49,10 +50,11 @@
           "min_lwt": "The absolute lowest flow temperature the heat pump should ever target.",
           "max_lwt": "The highest flow temperature the heat pump is allowed to target.",
           "max_tank_temp": "The scheduler will stop charging the buffer tank before it exceeds this temperature to prevent overheating.",
-          "tank_volume_liters": "Thermal storage capacity expressed as equivalent water volume (liters). For a standard buffer tank: enter the actual volume. For concrete thermal mass (e.g. heated slab): divide its heat capacity by 1.16 Wh/L·K — 30 tonnes of concrete ≈ 6000 L equivalent. For systems without hydraulic separation: enter the approximate pipe volume (minimum 10 L).",
+          "tank_volume_liters": "Thermal storage capacity expressed as equivalent water volume (liters). For a standard buffer tank: enter the actual volume. For concrete thermal mass (e.g. heated slab): divide its heat capacity by 1.16 Wh/L\u00b7K \u2014 30 tonnes of concrete \u2248 6000 L equivalent. For systems without hydraulic separation: enter the approximate pipe volume (minimum 10 L).",
           "lwt_heating_cold": "Target flow temperature at \u221210 \u00b0C outdoors (from your heating curve). Used to understand the heat transfer capabilities of your floors or radiators.",
           "lwt_heating_mild": "Target flow temperature at +10 \u00b0C outdoors. This, along with the cold setpoint, defines the slope of your heating curve.",
-          "t_room": "The target indoor temperature. Used with the heating curve to calculate the minimum flow temperature needed to keep the house warm."
+          "t_room": "The target indoor temperature. Used with the heating curve to calculate the minimum flow temperature needed to keep the house warm.",
+          "rated_max_elec_kw": "Maximum electrical input power from the datasheet (kW). Used to detect when the compressor is running at full capacity by comparing measured power draw. Capacity learning only triggers when actual draw exceeds 90 % of this value."
         }
       },
       "learning": {
@@ -121,7 +123,8 @@
           "tank_volume_liters": "Buffer Tank Volume",
           "lwt_heating_cold": "Heating Curve: Flow at \u221210 \u00b0C",
           "lwt_heating_mild": "Heating Curve: Flow at +10 \u00b0C",
-          "t_room": "Indoor Comfort Temperature"
+          "t_room": "Indoor Comfort Temperature",
+          "rated_max_elec_kw": "Rated Max Electrical Power"
         },
         "data_description": {
           "heat_pump_output_kw": "Rated heating capacity at full inverter load in kW (check your datasheet).",
@@ -129,10 +132,11 @@
           "min_lwt": "The absolute lowest flow temperature the heat pump should ever target.",
           "max_lwt": "The highest flow temperature the heat pump is allowed to target.",
           "max_tank_temp": "The scheduler will stop charging the buffer tank before it exceeds this temperature to prevent overheating.",
-          "tank_volume_liters": "Thermal storage capacity expressed as equivalent water volume (liters). For a standard buffer tank: enter the actual volume. For concrete thermal mass (e.g. heated slab): divide its heat capacity by 1.16 Wh/L·K — 30 tonnes of concrete ≈ 6000 L equivalent. For systems without hydraulic separation: enter the approximate pipe volume (minimum 10 L).",
+          "tank_volume_liters": "Thermal storage capacity expressed as equivalent water volume (liters). For a standard buffer tank: enter the actual volume. For concrete thermal mass (e.g. heated slab): divide its heat capacity by 1.16 Wh/L\u00b7K \u2014 30 tonnes of concrete \u2248 6000 L equivalent. For systems without hydraulic separation: enter the approximate pipe volume (minimum 10 L).",
           "lwt_heating_cold": "Target flow temperature at \u221210 \u00b0C outdoors (from your heating curve). Used to understand the heat transfer capabilities of your floors or radiators.",
           "lwt_heating_mild": "Target flow temperature at +10 \u00b0C outdoors. This, along with the cold setpoint, defines the slope of your heating curve.",
-          "t_room": "The target indoor temperature. Used with the heating curve to calculate the minimum flow temperature needed to keep the house warm."
+          "t_room": "The target indoor temperature. Used with the heating curve to calculate the minimum flow temperature needed to keep the house warm.",
+          "rated_max_elec_kw": "Maximum electrical input power from the datasheet (kW). Used to detect when the compressor is running at full capacity by comparing measured power draw. Capacity learning only triggers when actual draw exceeds 90 % of this value."
         }
       },
       "reconfigure_learning": {
@@ -184,13 +188,13 @@
         "data_description": {
           "dhw_enabled": "Enable DHW tank scheduling and COP contamination filtering.",
           "dhw_temp_sensor": "Sensor reporting the current temperature of the DHW tank. Used to initialise the tank model and to detect when the heat pump is running in DHW mode (COP filter).",
-          "dhw_operation_sensor": "Optional. A binary sensor that reads On when the heat pump is actively heating the DHW tank (e.g. a mode or status sensor from the heat pump integration). When configured, this is used as the primary DHW contamination signal for COP learning — more reliable than temperature-rise detection, especially when the tank is near its target temperature. Leave blank to use the temperature-rise fallback only.",
+          "dhw_operation_sensor": "Optional. A binary sensor that reads On when the heat pump is actively heating the DHW tank (e.g. a mode or status sensor from the heat pump integration). When configured, this is used as the primary DHW contamination signal for COP learning \u2014 more reliable than temperature-rise detection, especially when the tank is near its target temperature. Leave blank to use the temperature-rise fallback only.",
           "dhw_tank_volume_liters": "Volume of your DHW storage tank in litres.",
-          "dhw_min_temp": "Temperature below which the DHW tank is considered depleted and reheating is mandatory. Typically 40–45 °C.",
-          "dhw_target_temp": "Temperature the heat pump heats the DHW tank to. Typically 55 °C.",
-          "dhw_lwt": "Fixed flow temperature used when the heat pump runs in DHW mode. Must be at least as high as the target temperature. Typically 55–60 °C.",
-          "dhw_daily_demand_kwh": "Estimated thermal energy drawn from the DHW tank per day (kWh). Typical household: 2–5 kWh/day. Distributed evenly over 24 hours for planning.",
-          "dhw_ready_times": "Optional. One or more times when the DHW tank must be fully heated, as comma-separated HH:MM values (24-hour clock). Example: 07:00, 18:00. The scheduler treats these as hard constraints and ensures the tank reaches ≥ 90 % of its target temperature by each listed time, choosing the cheapest hours to heat. Leave blank to rely only on the never-empty constraint."
+          "dhw_min_temp": "Temperature below which the DHW tank is considered depleted and reheating is mandatory. Typically 40\u201345 \u00b0C.",
+          "dhw_target_temp": "Temperature the heat pump heats the DHW tank to. Typically 55 \u00b0C.",
+          "dhw_lwt": "Fixed flow temperature used when the heat pump runs in DHW mode. Must be at least as high as the target temperature. Typically 55\u201360 \u00b0C.",
+          "dhw_daily_demand_kwh": "Estimated thermal energy drawn from the DHW tank per day (kWh). Typical household: 2\u20135 kWh/day. Distributed evenly over 24 hours for planning.",
+          "dhw_ready_times": "Optional. One or more times when the DHW tank must be fully heated, as comma-separated HH:MM values (24-hour clock). Example: 07:00, 18:00. The scheduler treats these as hard constraints and ensures the tank reaches \u2265 90 % of its target temperature by each listed time, choosing the cheapest hours to heat. Leave blank to rely only on the never-empty constraint."
         }
       },
       "reconfigure_dhw": {

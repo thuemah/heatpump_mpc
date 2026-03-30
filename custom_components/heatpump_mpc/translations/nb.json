@@ -3,12 +3,12 @@
     "step": {
       "user": {
         "title": "Datakilder",
-        "description": "Koble Heat Pump MPC til dine eksisterende integrasjoner. Disse sensorene gir grunnlagsdataene som trengs for å optimalisere varmepumpens tidsplan.",
+        "description": "Koble Heat Pump MPC til dine eksisterende integrasjoner. Disse sensorene gir grunnlagsdataene som trengs for \u00e5 optimalisere varmepumpens tidsplan.",
         "data": {
           "ha_entity_id": "Heating Analytics-entitet",
-          "price_sensor": "Strømprissensor",
+          "price_sensor": "Str\u00f8mprissensor",
           "tank_temp_sensor": "Temperatursensor for akkumulatortank",
-          "weather_entity": "Værtjeneste"
+          "weather_entity": "V\u00e6rtjeneste"
         },
         "data_description": {
           "ha_entity_id": "Valgfri. Hvilken som helst sensor fra den Heating Analytics-instansen du \u00f8nsker \u00e5 f\u00f8lge. La st\u00e5 tom hvis du bare har \u00e9n instans installert.",
@@ -29,7 +29,8 @@
           "tank_volume_liters": "Volum p\u00e5 akkumulatortank",
           "lwt_heating_cold": "Varmekurve: Turtemperatur ved \u221210 \u00b0C",
           "lwt_heating_mild": "Varmekurve: Turtemperatur ved +10 \u00b0C",
-          "t_room": "Innend\u00f8rs komforttemperatur"
+          "t_room": "Innend\u00f8rs komforttemperatur",
+          "rated_max_elec_kw": "Maks elektrisk effekt (datablad)"
         },
         "data_description": {
           "heat_pump_output_kw": "Nominell varmekapasitet ved full inverterlast i kW (se datablad).",
@@ -37,10 +38,11 @@
           "min_lwt": "Den absolutt laveste turtemperaturen varmepumpen noen gang b\u00f8r sikte mot.",
           "max_lwt": "Den h\u00f8yeste turtemperaturen varmepumpen har lov til \u00e5 sikte mot.",
           "max_tank_temp": "Optimalisereren vil stoppe oppvarmingen av akkumulatortanken f\u00f8r den overstiger denne temperaturen for \u00e5 forhindre overoppheting.",
-          "tank_volume_liters": "Systemets termiske lagringskapasitet, uttrykt som ekvivalent vannvolum (liter). For en standard akkumulatortank: angi faktisk volum. For betongmasse (f.eks. betonggulv): del varmekapasiteten på 1,16 Wh/L·K — 30 tonn betong ≈ 6000 L ekvivalent. For systemer uten hydraulisk separasjon: angi omtrentlig rørvolum (minimum 10 L).",
+          "tank_volume_liters": "Systemets termiske lagringskapasitet, uttrykt som ekvivalent vannvolum (liter). For en standard akkumulatortank: angi faktisk volum. For betongmasse (f.eks. betonggulv): del varmekapasiteten p\u00e5 1,16 Wh/L\u00b7K \u2014 30 tonn betong \u2248 6000 L ekvivalent. For systemer uten hydraulisk separasjon: angi omtrentlig r\u00f8rvolum (minimum 10 L).",
           "lwt_heating_cold": "M\u00e5lsatt turtemperatur ved \u221210 \u00b0C utend\u00f8rs (fra varmekurven din). Brukes for \u00e5 forst\u00e5 varmeoverf\u00f8ringskapasiteten til gulv eller radiatorer.",
           "lwt_heating_mild": "M\u00e5lsatt turtemperatur ved +10 \u00b0C utend\u00f8rs. Dette, sammen med det kalde settpunktet, definerer hellingen p\u00e5 varmekurven din.",
-          "t_room": "M\u00e5lsatt innetemperatur. Brukes sammen med varmekurven for \u00e5 beregne minimum turtemperatur som kreves for \u00e5 holde huset varmt."
+          "t_room": "M\u00e5lsatt innetemperatur. Brukes sammen med varmekurven for \u00e5 beregne minimum turtemperatur som kreves for \u00e5 holde huset varmt.",
+          "rated_max_elec_kw": "Maksimalt elektrisk effektopptak fra databladet (kW). Brukes til \u00e5 oppdage n\u00e5r kompressoren kj\u00f8rer p\u00e5 full kapasitet ved \u00e5 sammenligne m\u00e5lt str\u00f8mtrekk. Kapasitetsl\u00e6ring utl\u00f8ses kun n\u00e5r faktisk forbruk overstiger 90 % av denne verdien."
         }
       },
       "learning": {
@@ -82,12 +84,12 @@
       },
       "reconfigure": {
         "title": "Rediger: Datakilder",
-        "description": "Oppdater kjernesensorene og værtjenesten som optimalisereren bruker.",
+        "description": "Oppdater kjernesensorene og v\u00e6rtjenesten som optimalisereren bruker.",
         "data": {
           "ha_entity_id": "Heating Analytics-entitet",
-          "price_sensor": "Strømprissensor",
+          "price_sensor": "Str\u00f8mprissensor",
           "tank_temp_sensor": "Temperatursensor for akkumulatortank",
-          "weather_entity": "Værtjeneste"
+          "weather_entity": "V\u00e6rtjeneste"
         },
         "data_description": {
           "ha_entity_id": "Valgfri. Hvilken som helst sensor fra den Heating Analytics-instansen du \u00f8nsker \u00e5 f\u00f8lge. La st\u00e5 tom hvis du bare har \u00e9n instans installert.",
@@ -108,7 +110,8 @@
           "tank_volume_liters": "Volum p\u00e5 akkumulatortank",
           "lwt_heating_cold": "Varmekurve: Turtemperatur ved \u221210 \u00b0C",
           "lwt_heating_mild": "Varmekurve: Turtemperatur ved +10 \u00b0C",
-          "t_room": "Innend\u00f8rs komforttemperatur"
+          "t_room": "Innend\u00f8rs komforttemperatur",
+          "rated_max_elec_kw": "Maks elektrisk effekt (datablad)"
         },
         "data_description": {
           "heat_pump_output_kw": "Nominell varmekapasitet ved full inverterlast i kW (se datablad).",
@@ -116,10 +119,11 @@
           "min_lwt": "Den absolutt laveste turtemperaturen varmepumpen noen gang b\u00f8r sikte mot.",
           "max_lwt": "Den h\u00f8yeste turtemperaturen varmepumpen har lov til \u00e5 sikte mot.",
           "max_tank_temp": "Optimalisereren vil stoppe oppvarmingen av akkumulatortanken f\u00f8r den overstiger denne temperaturen for \u00e5 forhindre overoppheting.",
-          "tank_volume_liters": "Systemets termiske lagringskapasitet, uttrykt som ekvivalent vannvolum (liter). For en standard akkumulatortank: angi faktisk volum. For betongmasse (f.eks. betonggulv): del varmekapasiteten på 1,16 Wh/L·K — 30 tonn betong ≈ 6000 L ekvivalent. For systemer uten hydraulisk separasjon: angi omtrentlig rørvolum (minimum 10 L).",
+          "tank_volume_liters": "Systemets termiske lagringskapasitet, uttrykt som ekvivalent vannvolum (liter). For en standard akkumulatortank: angi faktisk volum. For betongmasse (f.eks. betonggulv): del varmekapasiteten p\u00e5 1,16 Wh/L\u00b7K \u2014 30 tonn betong \u2248 6000 L ekvivalent. For systemer uten hydraulisk separasjon: angi omtrentlig r\u00f8rvolum (minimum 10 L).",
           "lwt_heating_cold": "M\u00e5lsatt turtemperatur ved \u221210 \u00b0C utend\u00f8rs (fra varmekurven din). Brukes for \u00e5 forst\u00e5 varmeoverf\u00f8ringskapasiteten til gulv eller radiatorer.",
           "lwt_heating_mild": "M\u00e5lsatt turtemperatur ved +10 \u00b0C utend\u00f8rs. Dette, sammen med det kalde settpunktet, definerer hellingen p\u00e5 varmekurven din.",
-          "t_room": "M\u00e5lsatt innetemperatur. Brukes sammen med varmekurven for \u00e5 beregne minimum turtemperatur som kreves for \u00e5 holde huset varmt."
+          "t_room": "M\u00e5lsatt innetemperatur. Brukes sammen med varmekurven for \u00e5 beregne minimum turtemperatur som kreves for \u00e5 holde huset varmt.",
+          "rated_max_elec_kw": "Maksimalt elektrisk effektopptak fra databladet (kW). Brukes til \u00e5 oppdage n\u00e5r kompressoren kj\u00f8rer p\u00e5 full kapasitet ved \u00e5 sammenligne m\u00e5lt str\u00f8mtrekk. Kapasitetsl\u00e6ring utl\u00f8ses kun n\u00e5r faktisk forbruk overstiger 90 % av denne verdien."
         }
       },
       "reconfigure_learning": {
@@ -197,8 +201,7 @@
           "dhw_target_temp": "M\u00e5ltemperatur for varmtvann",
           "dhw_lwt": "Turtemperatur for varmtvannsmodus",
           "dhw_daily_demand_kwh": "Daglig varmtvannsbehov",
-          "dhw_ready_times": "\u00abKlar innen\u00bb-tidspunkter",
-          "dhw_operation_sensor": "VV-driftssensor (valgfri)"
+          "dhw_ready_times": "\u00abKlar innen\u00bb-tidspunkter"
         },
         "data_description": {
           "dhw_enabled": "Aktiver planlegging av varmtvannstank og COP-kontamineringsfilter.",

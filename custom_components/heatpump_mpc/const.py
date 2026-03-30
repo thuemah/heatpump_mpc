@@ -36,6 +36,12 @@ CONF_MIN_OUTPUT_KW = "min_output_kw"
 """Minimum inverter thermal output (kW). The solver tests this against the full
 rated output and picks whichever is cheaper. Default: 4.37 kW (Sprsun R290)."""
 
+CONF_RATED_MAX_ELEC_KW = "rated_max_elec_kw"
+"""Rated maximum electrical input power of the heat pump (kW).
+Found in the datasheet.  Used as the reference for the measured-electrical-load
+gate: capacity learning only triggers when the actual electrical draw exceeds
+90 % of this value, proving the compressor was running at full capacity."""
+
 CONF_TANK_VOLUME_L = "tank_volume_liters"
 """Buffer tank volume (litres). Default: 300 L."""
 
@@ -144,6 +150,7 @@ DEFAULT_MAX_LWT = 55.0          # °C
 DEFAULT_MAX_TANK_TEMP = 55.0    # °C
 DEFAULT_HEAT_PUMP_OUTPUT_KW = 5.0
 DEFAULT_MIN_OUTPUT_KW = 4.37    # kW  — Sprsun R290 min inverter output
+DEFAULT_RATED_MAX_ELEC_KW = 3.5 # kW  — typical R290 max electrical input
 DEFAULT_TANK_VOLUME_L = 300.0   # litres
 DEFAULT_LWT_STEP = 5.0          # °C
 DEFAULT_TANK_STANDBY_LOSS_KWH = 0.05   # kWh / hour

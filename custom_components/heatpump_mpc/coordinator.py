@@ -116,6 +116,7 @@ from .const import (
     RESULT_DHW_SETPOINT,
     RESULT_DHW_PLANNED_HOURS,
     RESULT_SH_THERMAL_ENERGY_TOTAL_KWH,
+    CONF_RATED_MAX_ELEC_KW,
 )
 from .core.cop_learner import CopLearner, CopLearnerState, CopObservation
 from .core.heat_pump_model import HeatPumpModel
@@ -159,6 +160,8 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
         self._prev_optimal_lwt: float | None = None
         # DHW state tracking — used for COP contamination filter.
         self._prev_dhw_temp: float | None = None
+        # One-shot guard so the missing-rated_max_elec warning is logged only once.
+        self._logged_missing_rated_max_elec: bool = False
 
         # SH thermal energy accumulation (Track C)
         # _sh_total_kwh_th: lifetime cumulative SH thermal kWh (total_increasing sensor)
@@ -716,12 +719,6 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
             return
         heat_kwh = heat_kw * duration_h
 
-        # --- Implicit full-load detection from previous MPC decision ---
-        is_full_load = (
-            self._prev_output_kw is not None
-            and self._prev_output_kw >= config.heat_pump_output_kw - 0.1
-        )
-
         # --- Tank headroom at start of window (filters tank-limited observations) ---
         tank_headroom_kwh: float | None = None
         if self._prev_tank_temp is not None:
@@ -730,6 +727,19 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
             max_energy = (config.max_tank_temp - config.min_lwt) * _kwh_per_k
             tank_headroom_kwh = max(0.0, max_energy - tank_energy)
 
+        d = self.entry.data
+        rated_max_elec_raw = d.get(CONF_RATED_MAX_ELEC_KW)
+        rated_max_elec_kw: float | None = None
+        if rated_max_elec_raw is not None:
+            rated_max_elec_kw = float(rated_max_elec_raw)
+        elif not self._logged_missing_rated_max_elec:
+            _LOGGER.warning(
+                "rated_max_elec_kw is not configured — capacity learning is "
+                "disabled. Please reconfigure the integration and set 'Rated "
+                "Max Electrical Power' from the heat pump datasheet."
+            )
+            self._logged_missing_rated_max_elec = True
+
         obs = CopObservation(
             t_outdoor=t_outdoor,
             rh=rh,
@@ -737,7 +747,7 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
             heat_out_kwh=heat_kwh,
             elec_kwh=elec_delta,
             duration_hours=duration_h,
-            is_full_load=is_full_load,
+            rated_max_elec_kw=rated_max_elec_kw,
             rated_kw=config.heat_pump_output_kw,
             tank_headroom_kwh=tank_headroom_kwh,
         )

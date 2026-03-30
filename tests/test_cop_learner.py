@@ -149,8 +149,9 @@ def test_capacity_learning():
     learner = CopLearner(state)
 
     # Full-load observation near -7 °C anchor with ample tank headroom
+    # rated_max_elec_kw=1.0 and elec_kwh=1.0 means it was drawing full power.
     obs = CopObservation(-7.0, 60.0, 35.0, 3.9, 1.0,
-                         is_full_load=True, rated_kw=5.0, tank_headroom_kwh=10.0)
+                         rated_max_elec_kw=1.0, rated_kw=5.0, tank_headroom_kwh=10.0)
     res = learner.observe(obs)
 
     assert res.capacity_updated
@@ -163,8 +164,9 @@ def test_capacity_learning_skipped_when_not_full_load():
     state = CopLearnerState()
     learner = CopLearner(state)
 
-    obs = CopObservation(-7.0, 60.0, 35.0, 3.9, 1.0,
-                         is_full_load=False, rated_kw=5.0)
+    # elec_kwh=0.5 but rated_max_elec_kw=1.0 -> not full load.
+    obs = CopObservation(-7.0, 60.0, 35.0, 3.9, 0.5,
+                         rated_max_elec_kw=1.0, rated_kw=5.0)
     res = learner.observe(obs)
 
     assert not res.capacity_updated
@@ -176,7 +178,7 @@ def test_capacity_learning_skipped_when_tank_limiting():
 
     # heat_out (3.9 kWh) >= headroom (4.0 kWh) * 0.9 → tank was limiting
     obs = CopObservation(-7.0, 60.0, 35.0, 3.9, 1.0,
-                         is_full_load=True, rated_kw=5.0, tank_headroom_kwh=4.0)
+                         rated_max_elec_kw=1.0, rated_kw=5.0, tank_headroom_kwh=4.0)
     res = learner.observe(obs)
 
     assert not res.capacity_updated

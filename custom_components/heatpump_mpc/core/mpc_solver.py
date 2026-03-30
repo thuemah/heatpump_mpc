@@ -458,7 +458,18 @@ class MpcSolver:
         dhw_on = list(dhw_p1_blocked)  # Start from Phase 1 result; will be augmented.
 
         half_max_energy = dhw_max_energy * 0.5
-        ranked = sorted(range(n), key=lambda t: horizon[t].price / dhw_cop[t])
+
+        def _dhw_p2_cost(t: int) -> float:
+            # Rank by price/COP, but penalise isolated starts: an hour that would
+            # require a cold compressor start is ranked as if it costs an extra
+            # start_penalty_kwh × price.  This naturally makes Phase 2 prefer
+            # hours immediately after an existing SH or DHW P1 block (warm start),
+            # causing DHW opportunistic hours to cluster at the end of SH cycles.
+            prev_warm = t > 0 and (dhw_p1_blocked[t - 1] or (t - 1) in sh_locked_hours)
+            start_cost = 0.0 if prev_warm else config.start_penalty_kwh * horizon[t].price
+            return horizon[t].price / dhw_cop[t] + start_cost
+
+        ranked = sorted(range(n), key=_dhw_p2_cost)
         for t in ranked:
             if dhw_on[t] or t in sh_locked_hours:
                 continue
@@ -609,11 +620,28 @@ class MpcSolver:
         best_cost = float("inf")
         best_feasible = False
         best_lwt = lwt_list[0]
+        best_dhw_final: list[bool] = list(dhw_p1_blocked)
 
         for lwt in lwt_list:
             schedule, cost, feasible = self._solve_scenario(
                 horizon, config, tank_energy_init, lwt, dhw_p1_blocked
             )
+
+            # ------------------------------------------------------------------
+            # DHW Phase 2: run per-LWT so the true total cost (SH + DHW) drives
+            # LWT selection.  Priority ordering: DHW P1 > SH P1 > SH P2 > DHW P2.
+            # ------------------------------------------------------------------
+            if config.dhw_enabled:
+                sh_locked = {t for t, p in enumerate(schedule) if p.pump_on}
+                dhw_candidate = self._apply_dhw_phase2(
+                    horizon, dhw_init, config, dhw_p1_blocked, sh_locked
+                )
+                schedule = self._merge_dhw_into_schedule(
+                    schedule, horizon, dhw_candidate, dhw_init, config
+                )
+                cost = sum(p.electricity_cost for p in schedule)
+            else:
+                dhw_candidate = list(dhw_p1_blocked)
 
             # Prefer feasible over infeasible; among equal feasibility pick cheaper.
             if best_schedule is None:
@@ -630,33 +658,9 @@ class MpcSolver:
                 best_cost = cost
                 best_feasible = feasible
                 best_lwt = lwt
+                best_dhw_final = dhw_candidate
 
-        # ------------------------------------------------------------------
-        # DHW Phase 2: opportunistic pre-charging on hours free after SH.
-        #
-        # Only hours not used by SH (Phase 1 or Phase 2) are eligible.
-        # This guarantees the priority ordering:
-        #   DHW P1 > SH P1 > SH P2 > DHW P2
-        # ------------------------------------------------------------------
-        if config.dhw_enabled and best_schedule:
-            sh_locked = {t for t, p in enumerate(best_schedule) if p.pump_on}
-            dhw_final = self._apply_dhw_phase2(
-                horizon, dhw_init, config, dhw_p1_blocked, sh_locked
-            )
-        else:
-            dhw_final = dhw_p1_blocked
-
-        # ------------------------------------------------------------------
-        # Merge DHW state into the chosen SH schedule.
-        # ------------------------------------------------------------------
-        if config.dhw_enabled and best_schedule:
-            best_schedule = self._merge_dhw_into_schedule(
-                best_schedule,
-                horizon,
-                dhw_final,
-                dhw_init,
-                config,
-            )
+        dhw_final = best_dhw_final
 
         # optimal_output_kw: the action for the current hour (index 0).
         optimal_output_kw = (
@@ -710,7 +714,7 @@ class MpcSolver:
         e = max(0.0, (dhw_tank_temp_init - config.dhw_min_temp) * kwh_per_k_dhw)
 
         merged: list[HourPlan] = []
-        for plan, pt, is_dhw in zip(schedule, horizon, dhw_blocked):
+        for t, (plan, pt, is_dhw) in enumerate(zip(schedule, horizon, dhw_blocked)):
             if is_dhw:
                 cap = self._model.get_max_output_at(
                     pt.t_outdoor, config.dhw_lwt, config.heat_pump_output_kw
@@ -723,15 +727,57 @@ class MpcSolver:
             e_end = e + heat_in - pt.dhw_demand
             dhw_tank_t = config.dhw_min_temp + max(0.0, e_end) / kwh_per_k_dhw
 
-            merged.append(
-                _dc_replace(
-                    plan,
-                    dhw_on=is_dhw,
-                    dhw_heat_delivered_kwh=heat_in,
-                    dhw_tank_energy_kwh=e_end,
-                    dhw_tank_temp_c=dhw_tank_t,
+            # Actual combined compressor state from the previous hour, considering
+            # both SH and the full DHW schedule (Phase 1 + Phase 2).
+            prev_compressor_on = t > 0 and (schedule[t - 1].pump_on or dhw_blocked[t - 1])
+
+            if is_dhw:
+                # Compute DHW electricity cost — _solve_scenario recorded 0 for
+                # these hours since it only tracks SH heat delivery.
+                dhw_cop = max(
+                    0.1,
+                    self._model.get_effective_cop(pt.t_outdoor, pt.rh, config.dhw_lwt),
                 )
-            )
+                is_dhw_start = not prev_compressor_on
+                elec_cost = (heat_in / dhw_cop) * pt.price
+                if is_dhw_start and config.start_penalty_kwh > 0.0:
+                    elec_cost += config.start_penalty_kwh * pt.price
+                merged.append(
+                    _dc_replace(
+                        plan,
+                        dhw_on=True,
+                        dhw_heat_delivered_kwh=heat_in,
+                        dhw_tank_energy_kwh=e_end,
+                        dhw_tank_temp_c=dhw_tank_t,
+                        electricity_cost=elec_cost,
+                        start_event=is_dhw_start,
+                    )
+                )
+            else:
+                # SH or off hour.  Correct the start penalty charged by _solve_scenario
+                # if a DHW Phase 2 hour was added immediately before this SH run —
+                # the compressor was already warm, so no cold-start penalty applies.
+                elec_cost = plan.electricity_cost
+                is_start = plan.start_event
+                if (
+                    plan.pump_on
+                    and plan.start_event
+                    and prev_compressor_on
+                    and config.start_penalty_kwh > 0.0
+                ):
+                    elec_cost -= config.start_penalty_kwh * pt.price
+                    is_start = False
+                merged.append(
+                    _dc_replace(
+                        plan,
+                        dhw_on=False,
+                        dhw_heat_delivered_kwh=0.0,
+                        dhw_tank_energy_kwh=e_end,
+                        dhw_tank_temp_c=dhw_tank_t,
+                        electricity_cost=elec_cost,
+                        start_event=is_start,
+                    )
+                )
             e = max(0.0, e_end)
 
         return merged
@@ -888,9 +934,21 @@ class MpcSolver:
 
             # Start penalty: charged once per off→on transition.
             # The penalty is in electrical kWh (compressor startup loss) × price.
-            is_start = pump_on[t] and (t == 0 or not pump_on[t - 1])
+
+            # The compressor gets a start penalty ONLY if it starts for SH,
+            # and neither SH nor DHW was running the hour before.
+            is_start = pump_on[t] and (t == 0 or not (pump_on[t - 1] or dhw_blocked[t - 1]))
+
             if is_start and config.start_penalty_kwh > 0.0:
                 elec_cost += config.start_penalty_kwh * pt.price
+
+            compressor_running_now = pump_on[t] or dhw_blocked[t]
+            if t == 0:
+                compressor_running_prev = False
+            else:
+                compressor_running_prev = pump_on[t - 1] or dhw_blocked[t - 1]
+
+            start_event = compressor_running_now and not compressor_running_prev
 
             total_cost += elec_cost
 
@@ -910,7 +968,7 @@ class MpcSolver:
                     tank_energy_kwh=tank_end,
                     tank_temp_c=tank_t,
                     electricity_cost=elec_cost,
-                    start_event=is_start,
+                    start_event=start_event,
                 )
             )
 

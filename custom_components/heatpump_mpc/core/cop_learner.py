@@ -171,15 +171,17 @@ class CopObservation:
     duration_hours: float = 1.0
     """Length of the observation window (hours).  Used as a quality guard."""
 
-    is_full_load: bool = False
-    """True when the MPC commanded full output (``heat_pump_output_kw``) during
-    this observation window.  Used as the gate for capacity learning: only
-    full-load observations reflect the pump's actual capacity ceiling."""
+    rated_max_elec_kw: Optional[float] = None
+    """Rated maximum electrical input power of the heat pump (kW), from the
+    user's configuration.  When provided (> 0), the capacity-learning gate
+    checks whether the measured electrical draw exceeded 90 % of this value,
+    proving the compressor was running at full capacity regardless of who
+    commanded it (MPC, thermostat, legionella cycle, etc.)."""
 
     rated_kw: Optional[float] = None
     """Rated full-load thermal output (kW) from the user's configuration.
-    Required when ``is_full_load`` is True so the learner can compute the
-    observed capacity fraction = actual_kw / rated_kw."""
+    Required for capacity learning so the learner can compute the
+    observed capacity fraction = actual_thermal_kw / rated_kw."""
 
     tank_headroom_kwh: Optional[float] = None
     """Available tank headroom at the start of the observation window (kWh).
@@ -223,16 +225,16 @@ class CopLearnerState:
     capacity_frac_minus15: float = 0.63
     """Learned capacity fraction at −15 °C outdoor (fraction of rated output).
     Initialized from the static Sprsun R290 estimate; refined when the
-    compressor is observed running at maximum frequency at that temperature."""
+    measured electrical draw proves the compressor ran at full capacity."""
 
     capacity_frac_minus7: float = 0.78
     """Learned capacity fraction at −7 °C outdoor.  Same as above."""
 
     capacity_minus15_samples: int = 0
-    """Full-load observations that updated the −15 °C anchor."""
+    """Measured-full-load observations that updated the −15 °C anchor."""
 
     capacity_minus7_samples: int = 0
-    """Full-load observations that updated the −7 °C anchor."""
+    """Measured-full-load observations that updated the −7 °C anchor."""
 
     def to_dict(self) -> dict:
         """Serialise to a JSON-safe dict for HA storage."""
@@ -572,12 +574,13 @@ class CopLearner:
     ) -> tuple[bool, Optional[float], Optional[float]]:
         """
         Update the capacity fraction for the nearest temperature anchor when
-        the observation was made at full inverter output.
+        the observation's measured electrical draw proves the compressor was
+        running at full capacity.
 
-        The MPC's own output decision (``is_full_load``) replaces compressor
-        frequency as the "at-capacity" gate.  An additional tank-headroom
-        filter prevents updating when the tank — not the pump — was the
-        limiting factor.
+        Gate: ``actual_elec_kw > rated_max_elec_kw * 0.9``.  This is
+        independent of who commanded the load (MPC, thermostat, legionella
+        cycle).  An additional tank-headroom filter prevents updating when
+        the tank — not the pump — was the limiting factor.
 
         Returns
         -------
@@ -586,7 +589,14 @@ class CopLearner:
             *anchor_c*: The anchor temperature that was updated (°C), or None.
             *frac_observed*: The observed capacity fraction, or None.
         """
-        if not obs.is_full_load:
+        # Measured-electrical-load gate: only learn capacity when the
+        # compressor was drawing ≥ 90 % of its rated max electrical power.
+        if not obs.rated_max_elec_kw or obs.rated_max_elec_kw <= 0.0:
+            return False, None, None
+        if obs.duration_hours <= 0.0 or obs.elec_kwh <= 0.0:
+            return False, None, None
+        actual_elec_kw = obs.elec_kwh / obs.duration_hours
+        if actual_elec_kw < obs.rated_max_elec_kw * 0.9:
             return False, None, None
 
         # Tank-headroom filter: if the tank could not absorb more heat than
@@ -596,9 +606,6 @@ class CopLearner:
                 return False, None, None
 
         if not obs.rated_kw or obs.rated_kw <= 0.0:
-            return False, None, None
-
-        if obs.duration_hours <= 0.0:
             return False, None, None
 
         actual_kw = obs.heat_out_kwh / obs.duration_hours
