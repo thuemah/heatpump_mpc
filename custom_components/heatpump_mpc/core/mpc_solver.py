@@ -285,31 +285,20 @@ class MpcSolver:
         self._model = model
 
     # ------------------------------------------------------------------
-    # DHW pre-scheduler
+    # DHW pre-scheduler (Phase 1 and Phase 2 are separate methods)
     # ------------------------------------------------------------------
 
-    def _solve_dhw(
+    def _dhw_setup(
         self,
         horizon: list[HorizonPoint],
         dhw_tank_temp_init: float,
         config: MpcConfig,
-    ) -> list[bool]:
-        """
-        Schedule DHW reheating hours greedily.
+    ) -> tuple[int, float, float, list[float], list[float]]:
+        """Compute shared DHW constants and per-hour metrics.
 
-        DHW mode uses a fixed LWT (``config.dhw_lwt``) — no LWT sweep is
-        needed.  The algorithm mirrors the SH Phase-1 / Phase-2 structure:
-
-        Phase 1 — Constraint satisfaction
-            Schedule the cheapest hours (by DHW cost-per-kWh) that keep
-            the DHW tank from going empty throughout the horizon.
-
-        Phase 2 — Opportunistic pre-charging
-            Add cheap off-hours where the DHW tank still has headroom,
-            shifting demand to low-price windows.
-
-        Returns a boolean mask of length ``n``; True = HP runs in DHW mode
-        that hour.  These hours are *blocked* for SH scheduling.
+        Returns ``(n, dhw_energy_init, dhw_max_energy, dhw_cap, dhw_cop)``.
+        Called by both :py:meth:`_solve_dhw_phase1` and
+        :py:meth:`_apply_dhw_phase2` to avoid duplicating the setup.
         """
         n = len(horizon)
         kwh_per_k = config.dhw_tank_volume_liters * _WATER_KWH_PER_LITRE_K
@@ -318,7 +307,6 @@ class MpcSolver:
         )
         dhw_max_energy = (config.dhw_target_temp - config.dhw_min_temp) * kwh_per_k
 
-        # Per-hour metrics at the fixed DHW LWT.
         dhw_cap: list[float] = []
         dhw_cop: list[float] = []
         for pt in horizon:
@@ -332,28 +320,34 @@ class MpcSolver:
             dhw_cap.append(cap)
             dhw_cop.append(cop)
 
-        def _dhw_simulate(dhw_on: list[bool]) -> tuple[list[dict], bool]:
-            """Simulate DHW tank over the horizon.  Returns (states, feasible)."""
-            e = dhw_energy_init
-            states: list[dict] = []
-            feasible = True
-            for t in range(n):
-                tank_start = e
-                if dhw_on[t]:
-                    headroom = max(0.0, dhw_max_energy - e)
-                    heat_in = min(dhw_cap[t], headroom)
-                else:
-                    heat_in = 0.0
-                e_end = e + heat_in - horizon[t].dhw_demand
-                if e_end < 0.0:
-                    feasible = False
-                states.append({"tank_start": tank_start, "heat_in": heat_in, "tank_end": e_end})
-                e = max(0.0, e_end)
-            return states, feasible
+        return n, dhw_energy_init, dhw_max_energy, dhw_cap, dhw_cop
+
+    def _solve_dhw_phase1(
+        self,
+        horizon: list[HorizonPoint],
+        dhw_tank_temp_init: float,
+        config: MpcConfig,
+    ) -> list[bool]:
+        """
+        Phase 1 — DHW constraint satisfaction (survival scheduling only).
+
+        Schedules the minimum set of hours that keep the DHW tank from going
+        empty and satisfy any ready-by constraints throughout the horizon.
+        Uses full rated output to fill the tank quickly, minimising the number
+        of hours booked.
+
+        Returns a boolean mask of length ``n``; True = HP runs in DHW mode
+        that hour.  These hours are blocked for SH Phase 1 + Phase 2 scheduling.
+
+        DHW Phase 2 (opportunistic pre-charging) runs separately, after SH
+        scheduling, so that it never steals hours that SH Phase 1 needs.
+        """
+        n, dhw_energy_init, dhw_max_energy, dhw_cap, dhw_cop = self._dhw_setup(
+            horizon, dhw_tank_temp_init, config
+        )
 
         dhw_on = [False] * n
 
-        # Pre-compute ready-by index set and threshold energy for Phase 1.
         ready_by_set: set[int] = set(config.dhw_ready_by_hours)
         _READY_THRESHOLD = 0.90
         _ready_min_energy = dhw_max_energy * _READY_THRESHOLD
@@ -382,11 +376,6 @@ class MpcSolver:
                 e = max(0.0, e)
             return None
 
-        # Phase 1 — satisfy both depletion and ready-by constraints.
-        #
-        # Each iteration finds the earliest violation and adds the cheapest
-        # available off-hour before it.  Using full rated output charges the
-        # tank as quickly as possible, minimising the number of hours booked.
         for _ in range(n):
             violation = _find_first_violation(dhw_on)
             if violation is None:
@@ -399,40 +388,84 @@ class MpcSolver:
                     violation,
                 )
                 break
-            cheapest = min(
-                candidates,
-                key=lambda t: horizon[t].price / dhw_cop[t],
-            )
-            dhw_on[cheapest] = True
+            latest = candidates[-1]
+            dhw_on[latest] = True
 
-        # Phase 2 — opportunistic pre-charging in cheap off-hours.
-        #
-        # An hour is only kept when the DHW tank is *materially* below target
-        # at that point in the simulation.  The old check (heat_in > 0) was
-        # too permissive: with high daily demand relative to tank capacity the
-        # tank is continuously drained just enough to create tiny headroom, so
-        # heat_in ≈ demand for virtually every off-hour.  Accepting those hours
-        # books the pump for DHW maintenance all day and leaves no slots for
-        # space-heating scheduling.
-        #
-        # Fix: reject the hour if the DHW tank is already above half its
-        # capacity at that point (tank_start ≥ 50 % of dhw_max_energy).
-        # Using the *actual* simulation state (which includes all previously
-        # committed Phase-2 hours) means a recent Phase-2 run that refilled
-        # the tank will naturally prevent the very next hour from being added —
-        # eliminating the cascading maintenance effect.
+        return dhw_on
+
+    def _apply_dhw_phase2(
+        self,
+        horizon: list[HorizonPoint],
+        dhw_tank_temp_init: float,
+        config: MpcConfig,
+        dhw_p1_blocked: list[bool],
+        sh_locked_hours: set[int],
+    ) -> list[bool]:
+        """
+        Phase 2 — DHW opportunistic pre-charging.
+
+        Extends the Phase 1 schedule with cheap pre-charging hours, but only
+        on hours that are **genuinely free** — not already committed to DHW
+        (Phase 1) and not locked by SH scheduling (Phase 1 or Phase 2).
+
+        Running after SH scheduling ensures that space-heating survival and
+        opportunistic pre-charging always take priority over DHW opportunism.
+        This prevents the long-horizon failure mode where DHW Phase 2 books
+        cheap early hours before SH Phase 1 can use them to prevent tank
+        depletion.
+
+        An hour is added only when the DHW tank is materially below half its
+        maximum capacity at that point in the simulation — the same guard used
+        previously — to avoid booking hours that provide no meaningful benefit.
+
+        Parameters
+        ----------
+        dhw_p1_blocked:
+            Output of :py:meth:`_solve_dhw_phase1`; hours already committed
+            to DHW survival scheduling.
+        sh_locked_hours:
+            Set of hour indices used by SH scheduling (``pump_on = True`` in
+            the chosen SH schedule).
+
+        Returns
+        -------
+        list[bool]
+            Combined DHW schedule (Phase 1 + opportunistic Phase 2).
+        """
+        n, dhw_energy_init, dhw_max_energy, dhw_cap, dhw_cop = self._dhw_setup(
+            horizon, dhw_tank_temp_init, config
+        )
+
+        def _dhw_simulate(dhw_on: list[bool]) -> tuple[list[dict], bool]:
+            """Simulate DHW tank over the horizon.  Returns (states, feasible)."""
+            e = dhw_energy_init
+            states: list[dict] = []
+            feasible = True
+            for t in range(n):
+                tank_start = e
+                if dhw_on[t]:
+                    headroom = max(0.0, dhw_max_energy - e)
+                    heat_in = min(dhw_cap[t], headroom)
+                else:
+                    heat_in = 0.0
+                e_end = e + heat_in - horizon[t].dhw_demand
+                if e_end < 0.0:
+                    feasible = False
+                states.append({"tank_start": tank_start, "heat_in": heat_in, "tank_end": e_end})
+                e = max(0.0, e_end)
+            return states, feasible
+
+        dhw_on = list(dhw_p1_blocked)  # Start from Phase 1 result; will be augmented.
+
         half_max_energy = dhw_max_energy * 0.5
         ranked = sorted(range(n), key=lambda t: horizon[t].price / dhw_cop[t])
         for t in ranked:
-            if dhw_on[t]:
+            if dhw_on[t] or t in sh_locked_hours:
                 continue
             dhw_on[t] = True
             states, _ = _dhw_simulate(dhw_on)
             if (states[t]["heat_in"] <= 0.0 or
                     states[t]["tank_start"] >= half_max_energy):
-                # Tank was full, or it was above half capacity at this hour —
-                # no meaningful pre-charging benefit; revert to free the slot
-                # for space-heating scheduling.
                 dhw_on[t] = False
 
         return dhw_on
@@ -526,7 +559,15 @@ class MpcSolver:
         tank_energy_init = max(0.0, (tank_temp_init - config.min_lwt) * kwh_per_k)
 
         # ------------------------------------------------------------------
-        # DHW pre-scheduling pass
+        # DHW Phase 1: survival scheduling only.
+        #
+        # Books the minimum set of hours required to prevent the DHW tank
+        # from running dry and to satisfy any ready-by constraints.  These
+        # hours are blocked for the subsequent SH Phase 1 + Phase 2 pass.
+        #
+        # DHW Phase 2 (opportunistic pre-charging) is deferred until after
+        # SH scheduling so it never steals hours that SH Phase 1 needs to
+        # prevent the buffer tank from going empty.
         # ------------------------------------------------------------------
         if config.dhw_enabled:
             dhw_init = (
@@ -534,9 +575,10 @@ class MpcSolver:
                 if dhw_tank_temp_init is not None
                 else config.dhw_target_temp
             )
-            dhw_blocked = self._solve_dhw(horizon, dhw_init, config)
+            dhw_p1_blocked = self._solve_dhw_phase1(horizon, dhw_init, config)
         else:
-            dhw_blocked = [False] * len(horizon)
+            dhw_init = config.dhw_target_temp  # never used; defined for later guards
+            dhw_p1_blocked = [False] * len(horizon)
 
         lwt_list = _lwt_candidates(config)
 
@@ -570,7 +612,7 @@ class MpcSolver:
 
         for lwt in lwt_list:
             schedule, cost, feasible = self._solve_scenario(
-                horizon, config, tank_energy_init, lwt, dhw_blocked
+                horizon, config, tank_energy_init, lwt, dhw_p1_blocked
             )
 
             # Prefer feasible over infeasible; among equal feasibility pick cheaper.
@@ -590,14 +632,29 @@ class MpcSolver:
                 best_lwt = lwt
 
         # ------------------------------------------------------------------
+        # DHW Phase 2: opportunistic pre-charging on hours free after SH.
+        #
+        # Only hours not used by SH (Phase 1 or Phase 2) are eligible.
+        # This guarantees the priority ordering:
+        #   DHW P1 > SH P1 > SH P2 > DHW P2
+        # ------------------------------------------------------------------
+        if config.dhw_enabled and best_schedule:
+            sh_locked = {t for t, p in enumerate(best_schedule) if p.pump_on}
+            dhw_final = self._apply_dhw_phase2(
+                horizon, dhw_init, config, dhw_p1_blocked, sh_locked
+            )
+        else:
+            dhw_final = dhw_p1_blocked
+
+        # ------------------------------------------------------------------
         # Merge DHW state into the chosen SH schedule.
         # ------------------------------------------------------------------
         if config.dhw_enabled and best_schedule:
             best_schedule = self._merge_dhw_into_schedule(
                 best_schedule,
                 horizon,
-                dhw_blocked,
-                dhw_tank_temp_init if dhw_tank_temp_init is not None else config.dhw_target_temp,
+                dhw_final,
+                dhw_init,
                 config,
             )
 
@@ -606,8 +663,8 @@ class MpcSolver:
             best_schedule[0].output_kw if best_schedule else config.heat_pump_output_kw
         )
 
-        dhw_on_now = dhw_blocked[0] if dhw_blocked else False
-        dhw_planned_hours = sum(dhw_blocked)
+        dhw_on_now = dhw_final[0] if dhw_final else False
+        dhw_planned_hours = sum(dhw_final)
 
         if config.dhw_enabled:
             optimal_dhw_setpoint = (
