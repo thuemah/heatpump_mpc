@@ -68,6 +68,17 @@ from .const import (
     CONF_DHW_LWT,
     CONF_DHW_DAILY_DEMAND_KWH,
     CONF_DHW_READY_TIMES,
+    CONF_COIL_ENERGY_SENSOR,
+    CONF_COIL_DAILY_DEMAND_KWH,
+    DHW_MODE_COIL,
+    CONF_DHW_MODE,
+    DEFAULT_COIL_DAILY_DEMAND_KWH,
+    CONF_OPERATION_MODE,
+    OP_MODE_COP_ONLY,
+    CONF_HP_TYPE,
+    HP_TYPE_GSHP,
+    CONF_REFRIGERANT,
+    CONF_BRINE_TEMP_SENSOR,
     DEFAULT_WEATHER_ENTITY,
     DEFAULT_PRICE_SENSOR,
     DEFAULT_TANK_TEMP_SENSOR,
@@ -119,7 +130,7 @@ from .const import (
     CONF_RATED_MAX_ELEC_KW,
 )
 from .core.cop_learner import CopLearner, CopLearnerState, CopObservation
-from .core.heat_pump_model import HeatPumpModel
+from .core.heat_pump_model import HeatPumpModel, get_profile
 from .core.mpc_solver import HorizonPoint, MpcConfig, MpcResult, MpcSolver
 from .storage import HeatpumpMpcStorage
 
@@ -142,13 +153,27 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
             update_interval=timedelta(minutes=UPDATE_INTERVAL_MINUTES),
         )
         self.entry = entry
-        self._model = HeatPumpModel()
+
+        # Select cold-start profile from HP type + refrigerant config.
+        hp_type = entry.data.get(CONF_HP_TYPE, "ashp")
+        refrigerant = entry.data.get(CONF_REFRIGERANT, "r290")
+        self._profile = get_profile(hp_type, refrigerant)
+
+        self._model = HeatPumpModel(self._profile)
         self._solver = MpcSolver(self._model)
         self._storage = HeatpumpMpcStorage(hass, entry.entry_id)
+        self._is_cop_only = entry.data.get(CONF_OPERATION_MODE) == OP_MODE_COP_ONLY
+        self._is_gshp = hp_type == HP_TYPE_GSHP
 
         # COP / capacity learner — state loaded from disk in async_setup().
-        # Falls back to datasheet defaults if nothing has been persisted yet.
-        self._learner = CopLearner(CopLearnerState())
+        # Falls back to profile defaults if nothing has been persisted yet.
+        self._learner = CopLearner(
+            CopLearnerState(
+                eta_carnot=self._profile["eta_carnot_default"],
+                f_defrost=self._profile["f_defrost_default"],
+            ),
+            has_defrost=self._profile.get("has_defrost", True),
+        )
 
         # Previous cumulative electrical energy reading (kWh) for delta computation.
         self._prev_elec_kwh: float | None = None
@@ -177,6 +202,8 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
         self._sh_current_hour_kwh: float = 0.0
         self._sh_current_hour_kwh_el: float = 0.0
         self._sh_current_hour_sh_windows: int = 0
+        # Coil-in-tank: previous cumulative coil energy reading for delta.
+        self._prev_coil_kwh: float | None = None
         self._sh_current_hour_dhw_windows: int = 0
 
     # ------------------------------------------------------------------
@@ -205,15 +232,81 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
         self._sh_total_kwh_th = sh_total
         self._sh_hourly_buffer = sh_buffer
 
+        # Restore in-progress hour accumulator so mid-hour HA restarts
+        # do not lose partial thermal energy data.
+        pending = await self._storage.async_load_sh_pending_hour()
+        if pending is not None:
+            try:
+                self._sh_hour_start = datetime.fromisoformat(pending["hour_start"])
+                self._sh_current_hour_kwh = float(pending.get("kwh_th", 0.0))
+                self._sh_current_hour_kwh_el = float(pending.get("kwh_el", 0.0))
+                self._sh_current_hour_sh_windows = int(pending.get("sh_windows", 0))
+                self._sh_current_hour_dhw_windows = int(pending.get("dhw_windows", 0))
+                _LOGGER.debug(
+                    "Restored pending SH hour %s: %.4f kWh_th, %.4f kWh_el",
+                    self._sh_hour_start.isoformat(),
+                    self._sh_current_hour_kwh,
+                    self._sh_current_hour_kwh_el,
+                )
+            except (KeyError, ValueError, TypeError) as err:
+                _LOGGER.debug("Could not restore pending SH hour: %s", err)
+
     # ------------------------------------------------------------------
     # DataUpdateCoordinator protocol
     # ------------------------------------------------------------------
 
     async def _async_update_data(self) -> dict:
-        """Fetch all data sources, run the solver, return a result dict."""
+        """Fetch all data sources, run the solver, return a result dict.
+
+        In COP-only mode the solver is skipped entirely — only learning
+        and SH energy accumulation run.  The result dict contains COP and
+        energy data but no schedule or setpoint recommendations.
+        """
         try:
             now = dt_util.now()
 
+            # --- COP-only mode: learn only, no solver ---
+            if self._is_cop_only:
+                weather_forecast = await self._async_get_weather_forecast()
+                rh_map = _build_rh_map(weather_forecast)
+
+                # Build a minimal horizon for learning context (outdoor temp, RH).
+                ha_forecast = await self._async_get_ha_forecast()
+                horizon = self._build_horizon(ha_forecast, rh_map, {})
+                # Learning still needs a config for rated_kw etc.
+                config = self._build_mpc_config()
+
+                await self._learn_from_sensors(now, horizon, config)
+                self._model.apply_learned_capacity(self._learner.get_capacity_anchors())
+
+                self._prev_update_time = now
+
+                # Expose current COP estimate from learned parameters.
+                t_out = horizon[0].t_outdoor if horizon else 5.0
+                rh = horizon[0].rh if horizon else DEFAULT_RH
+                lwt = self.current_lwt
+                current_cop = max(1.0, self._model.get_effective_cop(t_out, rh, lwt))
+
+                return {
+                    RESULT_CURRENT_COP: round(current_cop, 2),
+                    RESULT_FEASIBLE: True,
+                    RESULT_SH_THERMAL_ENERGY_TOTAL_KWH: round(self._sh_total_kwh_th, 4),
+                    RESULT_OPTIMAL_LWT: lwt,
+                    RESULT_OPTIMAL_OUTPUT_KW: 0.0,
+                    RESULT_TOTAL_COST: 0.0,
+                    RESULT_SCHEDULE: [],
+                    RESULT_NEXT_RUN_START: None,
+                    RESULT_PUMP_ON_NOW: False,
+                    RESULT_PLANNED_RUN_HOURS: 0,
+                    RESULT_PLANNED_STARTS: 0,
+                    RESULT_PLANNED_KWH_THERMAL: 0.0,
+                    RESULT_PLANNED_KWH_ELECTRICAL: 0.0,
+                    RESULT_DHW_ON_NOW: False,
+                    RESULT_DHW_SETPOINT: 0.0,
+                    RESULT_DHW_PLANNED_HOURS: 0,
+                }
+
+            # --- Full MPC mode ---
             ha_forecast, weather_forecast, raw_prices = await asyncio.gather(
                 self._async_get_ha_forecast(),
                 self._async_get_weather_forecast(),
@@ -242,13 +335,28 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
 
             k_emission = self._compute_k_emission(horizon)
             dhw_enabled = bool(self.entry.data.get(CONF_DHW_ENABLED, False))
-            if dhw_enabled and horizon:
-                horizon_start = now.replace(minute=0, second=0, microsecond=0)
-                ready_by_hours = self._compute_ready_by_indices(horizon_start, len(horizon))
+            coil_mode = self.entry.data.get(CONF_DHW_MODE) == DHW_MODE_COIL
+            horizon_start = now.replace(minute=0, second=0, microsecond=0)
+            n_hours = len(horizon)
+
+            if coil_mode and horizon:
+                coil_ready_by = self._compute_ready_by_indices(
+                    horizon_start, n_hours
+                )
             else:
-                ready_by_hours = []
+                coil_ready_by = []
+
+            if dhw_enabled and not coil_mode and horizon:
+                dhw_ready_by = self._compute_ready_by_indices(
+                    horizon_start, n_hours
+                )
+            else:
+                dhw_ready_by = []
+
             config = self._build_mpc_config(
-                k_emission=k_emission, dhw_ready_by_hours=ready_by_hours
+                k_emission=k_emission,
+                dhw_ready_by_hours=dhw_ready_by,
+                coil_ready_by_hours=coil_ready_by,
             )
 
             # Learn from real measurements taken since the last update, then
@@ -293,6 +401,11 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
         The optional ``entity_id`` routes the call to the correct HA instance
         when multiple Heating Analytics instances are installed.
 
+        When ``isolate_sensor`` is set, Heating Analytics returns
+        ``max(0, global − Σ other_units)`` — the demand that this heat pump
+        must cover after all non-MPC units have contributed their predicted
+        share.  This prevents double-accounting in multi-unit installations.
+
         Returns an empty list on any failure so the caller can handle
         degraded state gracefully.
         """
@@ -306,6 +419,13 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
         service_data: dict = {"days": days}
         if ha_entity_id:
             service_data["entity_id"] = ha_entity_id
+
+        # Forecast isolation: send the electrical energy sensor entity_id so
+        # Heating Analytics subtracts non-MPC units' predicted contributions.
+        # Backward-compatible — omitted when not configured.
+        elec_sensor: str | None = self.entry.data.get(CONF_ELECTRICAL_ENERGY_SENSOR)
+        if elec_sensor:
+            service_data["isolate_sensor"] = elec_sensor
 
         try:
             response = await self.hass.services.async_call(
@@ -321,7 +441,11 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
             )
             return plan
         except Exception as err:
-            _LOGGER.warning("Failed to call heating_analytics.get_forecast: %s", err)
+            level = logging.DEBUG if not self.hass.is_running else logging.WARNING
+            _LOGGER.log(
+                level,
+                "Failed to call heating_analytics.get_forecast: %s", err,
+            )
             return []
 
     async def _async_get_weather_forecast(self) -> list[dict]:
@@ -351,7 +475,13 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
             )
             return forecasts
         except Exception as err:
-            _LOGGER.warning(
+            # During HA startup, weather entities may not yet be registered
+            # and the service call fails.  This is expected and harmless —
+            # the horizon builder uses DEFAULT_RH for missing slots.
+            # Log at DEBUG during startup, WARNING once HA is fully running.
+            level = logging.DEBUG if not self.hass.is_running else logging.WARNING
+            _LOGGER.log(
+                level,
                 "Failed to get weather forecast from %s: %s — "
                 "defrost RH will use default %.0f%%.",
                 entity_id,
@@ -384,7 +514,8 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
         state = self.hass.states.get(entity_id)
 
         if state is None:
-            _LOGGER.warning("Price sensor not found: %s", entity_id)
+            level = logging.DEBUG if not self.hass.is_running else logging.WARNING
+            _LOGGER.log(level, "Price sensor not found: %s", entity_id)
             return []
 
         attrs = state.attributes
@@ -424,18 +555,34 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
             return None
 
         if state.state in ("unknown", "unavailable", ""):
-            # Entity is registered but actively reporting a bad state — this is
-            # a genuine sensor fault worth surfacing at WARNING level.
-            _LOGGER.warning(
-                "Tank temperature sensor %s is %r — aborting solver run to avoid "
-                "generating a fictitious schedule.",
+            # During startup sensors often report "unavailable" briefly before
+            # their integration has finished loading.  Log at DEBUG until HA
+            # is fully running to avoid alarming log noise on every boot.
+            level = logging.DEBUG if not self.hass.is_running else logging.WARNING
+            _LOGGER.log(
+                level,
+                "Tank temperature sensor %s is %r — aborting solver run.",
                 entity_id,
                 state.state,
             )
             return None
 
+        # Staleness guard: reject readings older than 60 minutes.
+        # Catches frozen Modbus registers or offline sensors that remain
+        # "available" with a stale value.
+        if state.last_updated is not None:
+            age = dt_util.utcnow() - state.last_updated
+            if age > timedelta(minutes=60):
+                _LOGGER.warning(
+                    "Tank temperature sensor %s is stale (last updated %s ago) "
+                    "— aborting solver run.",
+                    entity_id,
+                    age,
+                )
+                return None
+
         try:
-            return float(state.state)
+            value = float(state.state)
         except ValueError:
             _LOGGER.warning(
                 "Cannot parse tank temperature '%s' from %s — aborting solver run.",
@@ -443,6 +590,20 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
                 entity_id,
             )
             return None
+
+        # Plausibility guard: a water-based heating buffer tank cannot
+        # physically be below 0 °C (frozen) or above 95 °C (near boiling).
+        # Values outside this range indicate sensor fault, wiring error,
+        # or unit-of-measurement misconfiguration.
+        if value < 0.0 or value > 95.0:
+            _LOGGER.warning(
+                "Tank temperature sensor %s reports implausible value "
+                "%.1f °C (expected 0–95 °C) — aborting solver run.",
+                entity_id,
+                value,
+            )
+            return None
+        return value
 
     def _get_dhw_tank_temp(self) -> float | None:
         """
@@ -468,8 +629,21 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
             )
             return DEFAULT_DHW_TANK_TEMP
 
+        # Staleness guard (same 60-min threshold as the primary tank sensor).
+        if state.last_updated is not None:
+            age = dt_util.utcnow() - state.last_updated
+            if age > timedelta(minutes=60):
+                _LOGGER.warning(
+                    "DHW tank sensor %s is stale (last updated %s ago); "
+                    "using default %.1f °C.",
+                    entity_id,
+                    age,
+                    DEFAULT_DHW_TANK_TEMP,
+                )
+                return DEFAULT_DHW_TANK_TEMP
+
         try:
-            return float(state.state)
+            value = float(state.state)
         except ValueError:
             _LOGGER.warning(
                 "Cannot parse DHW tank temp '%s' from %s; using default.",
@@ -477,6 +651,18 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
                 entity_id,
             )
             return DEFAULT_DHW_TANK_TEMP
+
+        # Plausibility guard: DHW tank should be within [0, 95] °C.
+        if value < 0.0 or value > 95.0:
+            _LOGGER.warning(
+                "DHW tank sensor %s reports implausible value %.1f °C; "
+                "using default %.1f °C.",
+                entity_id,
+                value,
+                DEFAULT_DHW_TANK_TEMP,
+            )
+            return DEFAULT_DHW_TANK_TEMP
+        return value
 
     def _read_dhw_operation_sensor(self) -> bool:
         """Return True when the DHW operation sensor reports the HP is in DHW mode.
@@ -513,6 +699,18 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
         """
         return self._sh_hourly_buffer
 
+    @property
+    def learner_state(self) -> "CopLearnerState":
+        """Current COP learner state (η_Carnot, f_defrost, thresholds)."""
+        return self._learner.state
+
+    @property
+    def current_lwt(self) -> float:
+        """Last optimal LWT from the solver, or min_lwt if no solve has run."""
+        if self._prev_optimal_lwt is not None:
+            return self._prev_optimal_lwt
+        return float(self.entry.data.get(CONF_MIN_LWT, DEFAULT_MIN_LWT))
+
     def _finalize_sh_hour_if_needed(self, now: datetime) -> None:
         """Flush the current SH accumulator to the buffer when the clock hour turns.
 
@@ -542,9 +740,20 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
         else:
             mode = "off"
 
+        # Subtract estimated buffer-tank standby loss from the thermal total
+        # so that Heating Analytics' Track C does not learn tank insulation
+        # losses as building demand.  Only applied when the pump was actively
+        # running (SH mode) because off-hours already report zero thermal.
+        standby_loss = float(
+            self.entry.data.get(CONF_TANK_STANDBY_LOSS_KWH, DEFAULT_TANK_STANDBY_LOSS_KWH)
+        )
+        net_kwh_th = self._sh_current_hour_kwh
+        if mode == "sh" and net_kwh_th > 0.0:
+            net_kwh_th = max(0.0, net_kwh_th - standby_loss)
+
         entry: dict = {
             "datetime": self._sh_hour_start.isoformat(),
-            "kwh_th_sh": round(self._sh_current_hour_kwh, 4),
+            "kwh_th_sh": round(net_kwh_th, 4),
             "kwh_el_sh": round(self._sh_current_hour_kwh_el, 4),
             "mode": mode,
         }
@@ -572,7 +781,20 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
             self._learner.state,
             self._sh_total_kwh_th,
             self._sh_hourly_buffer,
+            self._pending_hour_snapshot(),
         )
+
+    def _pending_hour_snapshot(self) -> dict | None:
+        """Return a serialisable snapshot of the in-progress hour accumulator."""
+        if self._sh_hour_start is None:
+            return None
+        return {
+            "hour_start": self._sh_hour_start.isoformat(),
+            "kwh_th": self._sh_current_hour_kwh,
+            "kwh_el": self._sh_current_hour_kwh_el,
+            "sh_windows": self._sh_current_hour_sh_windows,
+            "dhw_windows": self._sh_current_hour_dhw_windows,
+        }
 
     # ------------------------------------------------------------------
     # COP / capacity learning helpers
@@ -673,11 +895,42 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
         if duration_h < 0.1:
             return  # Unexpectedly short window; skip.
 
+        # Spike filter: reject deltas that exceed the physical maximum.
+        # A heat pump with rated_max_elec_kw cannot consume more than
+        # rated_max × duration × safety_margin kWh in any observation window.
+        # Safety margin of 1.5 accounts for brief overloads and measurement jitter.
+        rated_max_raw = self.entry.data.get(CONF_RATED_MAX_ELEC_KW)
+        if rated_max_raw is not None:
+            max_plausible_kwh = float(rated_max_raw) * duration_h * 1.5
+            if elec_delta > max_plausible_kwh:
+                _LOGGER.warning(
+                    "Electrical energy spike detected: %.2f kWh in %.2f h "
+                    "(max plausible %.2f kWh at %.1f kW). "
+                    "Skipping reading and updating baseline.",
+                    elec_delta,
+                    duration_h,
+                    max_plausible_kwh,
+                    float(rated_max_raw),
+                )
+                self._prev_elec_kwh = elec_kwh_now
+                return
+
         # --- Contextual conditions from current horizon slot ---
         # Computed here (before the thermal-output check) so the SH accumulation
         # below works even when no heat meter is configured.
         t_outdoor = horizon[0].t_outdoor if horizon else 5.0
         rh = horizon[0].rh if horizon else DEFAULT_RH
+
+        # GSHP: use brine inlet temperature as the source temperature for COP.
+        # Outdoor temp is still used for demand prediction (Heating Analytics),
+        # but the heat pump's COP depends on the brine temperature, not air.
+        if self._is_gshp:
+            brine = self._read_float_state(
+                self.entry.data.get(CONF_BRINE_TEMP_SENSOR), max_age_minutes=60
+            )
+            if brine is not None:
+                t_outdoor = brine  # override for COP calculation
+                rh = 50.0  # irrelevant for GSHP (no defrost)
         # Use the LWT the MPC actually recommended last cycle; fall back to
         # min_lwt only on the very first cycle before any solve has run.
         lwt = (
@@ -690,16 +943,57 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
         # kWh_th_sh = COP_sh × Δ_kWh_el  — no heat meter required.
         cop_sh = max(1.0, self._model.get_effective_cop(t_outdoor, rh, lwt))
         sh_kwh = cop_sh * elec_delta
+
+        # Secondary plausibility cap: even if rated_max_elec_kw was not
+        # configured (so the spike filter above was skipped), cap the
+        # per-cycle thermal accumulation at rated_thermal × duration × 2.
+        # This is a last-resort guard against corrupt energy readings
+        # inflating Track C data fed to Heating Analytics.
+        max_sh_kwh = float(
+            self.entry.data.get(CONF_HEAT_PUMP_OUTPUT_KW, DEFAULT_HEAT_PUMP_OUTPUT_KW)
+        ) * duration_h * 2.0
+        if sh_kwh > max_sh_kwh:
+            _LOGGER.warning(
+                "SH accumulation capped: %.2f kWh_th exceeds plausible "
+                "maximum %.2f kWh_th (rated=%.1f kW, duration=%.2f h). "
+                "Possible sensor glitch.",
+                sh_kwh,
+                max_sh_kwh,
+                float(self.entry.data.get(CONF_HEAT_PUMP_OUTPUT_KW, DEFAULT_HEAT_PUMP_OUTPUT_KW)),
+                duration_h,
+            )
+            sh_kwh = max_sh_kwh
+
+        # --- Coil-in-tank: subtract spiral energy from SH accumulation ---
+        # Without this, Heating Analytics would learn the spiral load as
+        # building heat loss, inflating the U-value.  The coil energy sensor
+        # measures thermal kWh drawn through the spiral; we subtract the
+        # delta from this cycle's SH thermal accumulation.
+        coil_correction = 0.0
+        coil_sensor = self.entry.data.get(CONF_COIL_ENERGY_SENSOR)
+        if coil_sensor and self.entry.data.get(CONF_DHW_MODE) == DHW_MODE_COIL:
+            coil_kwh_now = self._read_float_state(coil_sensor)
+            if coil_kwh_now is not None:
+                if self._prev_coil_kwh is not None:
+                    coil_delta = coil_kwh_now - self._prev_coil_kwh
+                    if 0.0 < coil_delta <= sh_kwh:
+                        coil_correction = coil_delta
+                self._prev_coil_kwh = coil_kwh_now
+
+        sh_kwh_net = max(0.0, sh_kwh - coil_correction)
+
         self._sh_current_hour_sh_windows += 1
-        self._sh_current_hour_kwh += sh_kwh
+        self._sh_current_hour_kwh += sh_kwh_net
         self._sh_current_hour_kwh_el += elec_delta
-        self._sh_total_kwh_th += sh_kwh
+        self._sh_total_kwh_th += sh_kwh_net
         _LOGGER.debug(
             "SH accumulation: cop_sh=%.2f elec_delta=%.4f kWh → sh=%.4f kWh "
-            "(hour_th=%.4f hour_el=%.4f total=%.3f)",
+            "(coil_correction=%.4f net=%.4f hour_th=%.4f hour_el=%.4f total=%.3f)",
             cop_sh,
             elec_delta,
             sh_kwh,
+            coil_correction,
+            sh_kwh_net,
             self._sh_current_hour_kwh,
             self._sh_current_hour_kwh_el,
             self._sh_total_kwh_th,
@@ -715,6 +1009,7 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
                 self._learner.state,
                 self._sh_total_kwh_th,
                 self._sh_hourly_buffer,
+                self._pending_hour_snapshot(),
             )
             return
         heat_kwh = heat_kw * duration_h
@@ -769,6 +1064,7 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
             self._learner.state,
             self._sh_total_kwh_th,
             self._sh_hourly_buffer,
+            self._pending_hour_snapshot(),
         )
 
         self._prev_elec_kwh = elec_kwh_now
@@ -780,11 +1076,36 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
         Track A: direct ``thermal_power_sensor`` (instantaneous kW).
         Track B: ``flow_rate_sensor`` × ΔT × conversion factor.
 
-        Returns None when no thermal measurement is available.
+        Returns None when no thermal measurement is available.  Implausible
+        readings (negative or far above rated output) are rejected to prevent
+        sensor glitches from corrupting COP learning.
         """
-        # Track A — dedicated heat meter
-        power_kw = self._read_float_state(d.get(CONF_THERMAL_POWER_SENSOR))
+        rated_kw = float(d.get(CONF_HEAT_PUMP_OUTPUT_KW, DEFAULT_HEAT_PUMP_OUTPUT_KW))
+        # 2× rated output is the hard ceiling — accounts for measurement
+        # overshoot and brief transients but catches decimal-point errors
+        # (e.g. sensor reporting 50 kW instead of 5.0 kW).
+        max_plausible_kw = rated_kw * 2.0
+
+        # Track A — dedicated heat meter (reject if stale > 60 min)
+        power_kw = self._read_float_state(
+            d.get(CONF_THERMAL_POWER_SENSOR), max_age_minutes=60
+        )
         if power_kw is not None:
+            if power_kw < 0.0:
+                _LOGGER.warning(
+                    "Thermal power sensor reports negative value (%.2f kW) "
+                    "— treating as unavailable.",
+                    power_kw,
+                )
+                return None
+            if power_kw > max_plausible_kw:
+                _LOGGER.warning(
+                    "Thermal power sensor reports implausible value (%.2f kW, "
+                    "rated %.1f kW) — treating as unavailable.",
+                    power_kw,
+                    rated_kw,
+                )
+                return None
             return power_kw
 
         # Track B — flow × ΔT
@@ -798,8 +1119,25 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
         if flow is None or supply is None or ret is None:
             return None
 
+        # Flow must be positive; negative flow indicates a sensor fault or
+        # reversed wiring.
+        if flow <= 0.0:
+            _LOGGER.debug("Flow rate sensor reports %.2f — skipping.", flow)
+            return None
+
         delta_t = supply - ret
         if delta_t <= 0.0:
+            return None
+        # Reject implausible ΔT (>25 K is unrealistic for hydronic heating;
+        # catches sensor wiring errors or stuck readings).
+        if delta_t > 25.0:
+            _LOGGER.warning(
+                "Flow ΔT is implausibly high (%.1f K, supply=%.1f ret=%.1f) "
+                "— treating thermal power as unavailable.",
+                delta_t,
+                supply,
+                ret,
+            )
             return None
 
         flow_unit = d.get(CONF_FLOW_UNIT, FLOW_UNIT_LMIN)
@@ -807,17 +1145,47 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
         if flow_unit != FLOW_UNIT_LMIN:
             flow = flow * 1000.0 / 60.0   # m³/h → L/min
 
-        return flow * delta_t * 1.163 / 60.0
+        computed_kw = flow * delta_t * 1.163 / 60.0
+        if computed_kw > max_plausible_kw:
+            _LOGGER.warning(
+                "Flow-derived thermal power is implausible (%.2f kW, "
+                "rated %.1f kW) — treating as unavailable.",
+                computed_kw,
+                rated_kw,
+            )
+            return None
+        return computed_kw
 
-    def _read_float_state(self, entity_id: str | None) -> float | None:
-        """
-        Read a sensor entity state and return it as a float, or None on any failure.
+    def _read_float_state(
+        self, entity_id: str | None, *, max_age_minutes: int = 0
+    ) -> float | None:
+        """Read a sensor entity state and return it as a float, or None on any failure.
+
+        Parameters
+        ----------
+        max_age_minutes:
+            When > 0, reject the reading if the sensor's ``last_updated``
+            timestamp is older than *max_age_minutes*.  This catches stale
+            sensors that remain "available" with a frozen value (e.g. a
+            stuck Modbus register or an offline heat meter).
+            Default 0 disables the staleness check (backward-compatible).
         """
         if not entity_id:
             return None
         state = self.hass.states.get(entity_id)
         if state is None or state.state in ("unknown", "unavailable", ""):
             return None
+        if max_age_minutes > 0 and state.last_updated is not None:
+            age = dt_util.utcnow() - state.last_updated
+            if age > timedelta(minutes=max_age_minutes):
+                _LOGGER.warning(
+                    "Sensor %s is stale (last updated %s ago, limit %d min) "
+                    "— treating as unavailable.",
+                    entity_id,
+                    age,
+                    max_age_minutes,
+                )
+                return None
         try:
             return float(state.state)
         except ValueError:
@@ -858,13 +1226,21 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
         lwt_mild = float(self.entry.data.get(CONF_LWT_HEATING_MILD, DEFAULT_LWT_HEATING_MILD))
 
         # DHW hourly demand — evenly distributed daily budget.
+        # In coil-in-tank mode, dhw_demand is repurposed as the spiral load
+        # drawn from the SH tank (the solver subtracts it from the SH tank
+        # instead of a separate DHW tank).
         dhw_enabled: bool = bool(self.entry.data.get(CONF_DHW_ENABLED, False))
-        dhw_hourly_demand = (
-            float(self.entry.data.get(CONF_DHW_DAILY_DEMAND_KWH, DEFAULT_DHW_DAILY_DEMAND_KWH))
-            / 24.0
-            if dhw_enabled
-            else 0.0
-        )
+        coil_mode: bool = self.entry.data.get(CONF_DHW_MODE) == DHW_MODE_COIL
+        if coil_mode:
+            dhw_hourly_demand = float(self.entry.data.get(
+                CONF_COIL_DAILY_DEMAND_KWH, DEFAULT_COIL_DAILY_DEMAND_KWH
+            )) / 24.0
+        elif dhw_enabled:
+            dhw_hourly_demand = float(self.entry.data.get(
+                CONF_DHW_DAILY_DEMAND_KWH, DEFAULT_DHW_DAILY_DEMAND_KWH
+            )) / 24.0
+        else:
+            dhw_hourly_demand = 0.0
 
         price_sensor: str | None = self.entry.data.get(CONF_PRICE_SENSOR)
         price_map = _parse_price_map(raw_prices)
@@ -1051,11 +1427,26 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
     # ------------------------------------------------------------------
 
     def _build_mpc_config(
-        self, k_emission: float = 0.0, dhw_ready_by_hours: list[int] | None = None
+        self,
+        k_emission: float = 0.0,
+        dhw_ready_by_hours: list[int] | None = None,
+        coil_ready_by_hours: list[int] | None = None,
     ) -> MpcConfig:
         """Construct an ``MpcConfig`` from the config entry."""
         d = self.entry.data
         dhw_enabled = bool(d.get(CONF_DHW_ENABLED, False))
+        coil_mode = d.get(CONF_DHW_MODE) == DHW_MODE_COIL
+
+        # Coil reserve: one ready-by draw ≈ half the daily budget (morning
+        # shower).  The user's daily budget ÷ number of ready-by slots gives
+        # the per-slot reserve.  Capped at 50 % of max tank energy later.
+        coil_reserve = 0.0
+        if coil_mode and coil_ready_by_hours:
+            daily = float(d.get(
+                CONF_COIL_DAILY_DEMAND_KWH, DEFAULT_COIL_DAILY_DEMAND_KWH
+            ))
+            coil_reserve = daily / max(1, len(coil_ready_by_hours))
+
         return MpcConfig(
             min_lwt=float(d.get(CONF_MIN_LWT, DEFAULT_MIN_LWT)),
             max_lwt=float(d.get(CONF_MAX_LWT, DEFAULT_MAX_LWT)),
@@ -1074,7 +1465,8 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
             start_penalty_kwh=float(
                 d.get(CONF_START_PENALTY_KWH, DEFAULT_START_PENALTY_KWH)
             ),
-            dhw_enabled=dhw_enabled,
+            # Separate DHW tank (mutually exclusive with coil_in_tank)
+            dhw_enabled=dhw_enabled and not coil_mode,
             dhw_tank_volume_liters=float(
                 d.get(CONF_DHW_TANK_VOLUME_L, DEFAULT_DHW_TANK_VOLUME_L)
             ),
@@ -1082,6 +1474,10 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
             dhw_target_temp=float(d.get(CONF_DHW_TARGET_TEMP, DEFAULT_DHW_TARGET_TEMP)),
             dhw_lwt=float(d.get(CONF_DHW_LWT, DEFAULT_DHW_LWT)),
             dhw_ready_by_hours=dhw_ready_by_hours if dhw_ready_by_hours is not None else [],
+            # Coil-in-tank
+            coil_in_tank=coil_mode,
+            coil_ready_by_hours=coil_ready_by_hours if coil_ready_by_hours is not None else [],
+            coil_reserve_kwh=coil_reserve,
         )
 
 

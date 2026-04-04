@@ -124,6 +124,13 @@ Inverter heat pumps achieve higher COP at part-load. The modulation gain
 linearly interpolates between min-load and full-load COP based on requested
 output, then applies the defrost penalty.
 
+**Capacity-aware COP estimation**: The solver passes the *physical* capacity
+ceiling (derated by outdoor temperature) as `max_output_kw`, not the rated
+output. At extreme cold (e.g. −20 °C where capacity drops below
+`min_output_kw`), this causes `min_output_kw ≥ max_output_kw`, which
+correctly triggers the early return of `cop_full` — the pump is at 100% of
+its available capacity and receives no part-load COP benefit.
+
 ### Capacity derating — `get_max_output_at(t_outdoor, lwt, rated_kw)`
 
 Inverter heat pumps lose the ability to deliver their rated output at low
@@ -206,6 +213,49 @@ rather than evaluating the whole horizon at a fixed output level.
 The cheapest feasible LWT wins; if none are feasible, the least-violated
 scenario is returned with `feasible=False`.
 
+**Coil-in-tank (DHW spiral inside SH buffer)**
+
+When `coil_in_tank` is True, the solver operates in a fundamentally
+different mode: there is no separate DHW tank and no mode-switching.  The
+DHW spiral is a passive heat exchanger inside the SH buffer, drawing
+thermal energy at whatever temperature the tank currently holds.
+
+The heat pump always runs in SH mode at the optimal (low-lift) COP.  A
+downstream hot water heater (electric or HP) tops up the difference.
+
+Implementation: `HorizonPoint.dhw_demand` carries the spiral load (daily
+budget ÷ 24), and `_simulate()` subtracts it from the SH tank when
+`config.coil_in_tank` is True.  Ready-by constraints are enforced as a
+minimum energy reserve on the SH tank at specified hours:
+
+```
+if t in coil_ready_by_hours and tank_end < coil_reserve_kwh:
+    feasible = False   # triggers Phase 1 to schedule more pump hours
+```
+
+`coil_reserve_kwh` = daily spiral demand ÷ number of ready-by slots.
+
+No new solver, no mode-switching, no high-LWT cycles.  The spiral is
+simply "more demand on the same tank."
+
+Track C correction: the coordinator subtracts observed spiral energy
+(from a cumulative kWh sensor on the spiral circuit) from the SH thermal
+accumulation, preventing Heating Analytics from learning spiral load as
+building heat loss.
+
+### SH/DHW conflict resolution
+
+When all LWT candidates produce an infeasible SH schedule and DHW Phase 1
+has booked hours that SH Phase 1 needed, the solver performs a fallback pass:
+
+1. Drop all DHW Phase 1 blocked hours (`no_dhw = [False] * n`).
+2. Re-evaluate all LWT candidates without DHW constraints.
+3. If any produces a feasible SH schedule, accept it and drop DHW for
+   this horizon.
+
+This ensures space heating survival always takes priority over DHW
+pre-heating. The DHW tank may cool down, but the house will not freeze.
+
 ### Decision metric
 
 ```
@@ -280,6 +330,55 @@ full tank and very little headroom, so most hours are correctly rejected.
 
 ---
 
+## Sensor Source-Data Protection
+
+All sensor inputs pass through a multi-layered validation pipeline before
+they can influence the COP model or the SH hourly buffer (Track C).
+Inspired by Heating Analytics' energy meter protection.
+
+### Electrical energy sensor — spike filter
+
+```
+max_plausible = rated_max_elec_kw × duration_h × 1.5
+if elec_delta > max_plausible:
+    skip + update baseline
+```
+
+The 1.5× safety margin accounts for brief overloads and measurement jitter.
+When `rated_max_elec_kw` is not configured, the spike filter is bypassed
+but the SH accumulation cap (below) provides a secondary guard.
+
+### Thermal power — plausibility bounds
+
+Readings from the heat meter (Track A) or flow × ΔT (Track B) are rejected
+when negative or above `2 × rated_thermal_kw`.  Track B additionally
+rejects negative flow rates and ΔT > 25 K.
+
+### Tank temperatures — range and staleness
+
+Both the SH buffer tank and DHW tank sensors are checked for:
+- State validity (`unknown`, `unavailable`, empty)
+- Staleness: `last_updated` > 60 minutes → rejected
+- Physical plausibility: value outside [0, 95] °C → rejected
+
+The SH tank is a hard dependency (missing → solver aborted); the DHW tank
+falls back to `DEFAULT_DHW_TANK_TEMP` on any failure.
+
+### SH accumulation plausibility cap
+
+Even when the spike filter is bypassed, the per-cycle thermal energy
+accumulated for Track C is capped at `rated_thermal × duration × 2`:
+
+```
+max_sh_kwh = heat_pump_output_kw × duration_h × 2.0
+sh_kwh = min(sh_kwh, max_sh_kwh)
+```
+
+This prevents a single corrupt energy reading from inflating the data
+that Heating Analytics uses to learn the building's thermal demand.
+
+---
+
 ## Runtime Learning (`core/cop_learner.py`)
 
 ### What is learned and why
@@ -332,6 +431,24 @@ Cold-start values (Sprsun R290 datasheet defaults) are used until
 sufficient data is available. The transition from prior to learned is
 selective: each anchor transitions independently.
 
+### SH thermal energy — Track C interface
+
+Every 30-minute learning cycle, the coordinator accumulates SH thermal
+energy (`cop_sh × elec_delta`) into per-hour buckets.  Completed hours
+are flushed to a rolling 48-entry buffer (`sh_hourly_buffer`) exposed via
+the `get_sh_hourly` service for Heating Analytics' Midnight Retrospective.
+
+**Standby loss correction**: Before flushing, estimated buffer-tank standby
+losses are subtracted from the hourly thermal total:
+
+```
+net_kwh_th = max(0, sh_current_hour_kwh − tank_standby_loss_kwh)
+```
+
+This prevents Heating Analytics from learning tank insulation losses as
+building demand — breaking the inflation feedback loop where MPC
+overdelivery slowly inflates the learned U-value.
+
 ### Persistence (`storage.py`)
 
 `HeatpumpMpcStorage` wraps `homeassistant.helpers.storage.Store`.
@@ -349,9 +466,20 @@ Stored as `.storage/heatpump_mpc.<entry_id>` (schema v1):
     "capacity_minus7_samples": 31,
     "eta_carnot_samples": 203,
     "f_defrost_samples": 61
+  },
+  "sh_total_kwh_th": 123.456,
+  "sh_hourly_buffer": [{"datetime": "...", "kwh_th_sh": 3.2, "kwh_el_sh": 0.8, "mode": "sh"}],
+  "sh_pending_hour": {
+    "hour_start": "2026-04-01T14:00:00+02:00",
+    "kwh_th": 1.234, "kwh_el": 0.321,
+    "sh_windows": 1, "dhw_windows": 0
   }
 }
 ```
+
+The `sh_pending_hour` key persists the in-progress hour accumulator every
+30-minute cycle (not only at hour boundaries).  On HA restart, the pending
+hour is restored so mid-hour restarts no longer lose partial Track C data.
 
 Writes are debounced (30 s) so frequent learning updates coalesce into
 one disk write. On HA restart, `coordinator.async_setup()` loads state

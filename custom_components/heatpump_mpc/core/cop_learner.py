@@ -334,10 +334,12 @@ class CopLearner:
         state: CopLearnerState,
         eta_learning_rate: float = DEFAULT_ETA_LEARNING_RATE,
         defrost_learning_rate: float = DEFAULT_DEFROST_LEARNING_RATE,
+        has_defrost: bool = True,
     ) -> None:
         self.state = state
         self._eta_lr = eta_learning_rate
         self._defrost_lr = defrost_learning_rate
+        self._has_defrost = has_defrost
 
     # ------------------------------------------------------------------
     # Public API
@@ -636,7 +638,13 @@ class CopLearner:
         return True, anchor, round(frac_observed, 3)
 
     def _is_defrost_condition(self, t_outdoor: float, rh: float) -> bool:
-        """True when outdoor conditions suggest active evaporator icing."""
+        """True when outdoor conditions suggest active evaporator icing.
+
+        Always returns False when ``has_defrost`` is disabled (GSHP), so all
+        observations are routed to the η_Carnot track instead of f_defrost.
+        """
+        if not self._has_defrost:
+            return False
         return (
             t_outdoor < self.state.defrost_t_threshold
             and rh > self.state.defrost_rh_threshold

@@ -317,6 +317,223 @@ def test_start_penalty_adds_cost(solver, config):
             assert i == 0 or not r_with.schedule[i - 1].pump_on
 
 
+def test_dhw_phase1_picks_cheapest_hour():
+    """O6: DHW Phase 1 should pick the cheapest hour (price/COP), not the latest.
+
+    Given candidate hours before a DHW tank violation — one cheap and several
+    expensive — Phase 1 should include the cheaper one in its schedule.
+    """
+    config = MpcConfig(
+        min_lwt=35.0, max_lwt=55.0, max_tank_temp=55.0,
+        heat_pump_output_kw=9.0, tank_volume_liters=300.0,
+        lwt_step=5.0, tank_standby_loss_kwh=0.05, min_output_kw=3.0,
+        dhw_enabled=True, dhw_tank_volume_liters=180.0,
+        dhw_min_temp=40.0, dhw_target_temp=55.0, dhw_lwt=55.0,
+    )
+    # Moderate DHW demand — enough to need 1-2 hours of DHW, not all of them.
+    dhw_demand = 0.5  # kWh/h
+    horizon = [
+        HorizonPoint(price=5.0, t_outdoor=5.0, rh=60.0, house_demand=0.5, dhw_demand=dhw_demand),
+        HorizonPoint(price=0.1, t_outdoor=5.0, rh=60.0, house_demand=0.5, dhw_demand=dhw_demand),  # very cheap
+        HorizonPoint(price=5.0, t_outdoor=5.0, rh=60.0, house_demand=0.5, dhw_demand=dhw_demand),
+        HorizonPoint(price=5.0, t_outdoor=5.0, rh=60.0, house_demand=0.5, dhw_demand=dhw_demand),
+        HorizonPoint(price=5.0, t_outdoor=5.0, rh=60.0, house_demand=0.5, dhw_demand=dhw_demand),
+        HorizonPoint(price=5.0, t_outdoor=5.0, rh=60.0, house_demand=0.5, dhw_demand=dhw_demand),
+    ]
+
+    solver = MpcSolver(MockHeatPumpModel())
+    # DHW tank starts at 45 °C → 1.044 kWh above min.  With 0.5 kWh/h demand,
+    # the tank survives ~2 hours before depleting, so the violation occurs at
+    # hour 2 — giving Phase 1 candidates [0, 1, 2] to choose from.
+    result = solver.solve(horizon, 45.0, config, dhw_tank_temp_init=45.0)
+
+    # Find which hours were scheduled for DHW
+    dhw_hours = [p.hour_index for p in result.schedule if p.dhw_on]
+    assert len(dhw_hours) >= 1, "DHW Phase 1 should have scheduled at least one hour."
+    # The cheap hour (index 1, price=0.1) should be preferred over index 0 (price=5.0).
+    assert 1 in dhw_hours, (
+        f"DHW Phase 1 did not pick the cheapest hour (index 1, price=0.1). "
+        f"Scheduled DHW at hours: {dhw_hours}"
+    )
+
+
+def test_capacity_limited_cop_not_inflated():
+    """O4: At extreme cold where capacity < min_output, the solver must not
+    assign min-load (best) COP to what is actually a full-load operating point.
+
+    We use a real HeatPumpModel (not mock) to verify the fix end-to-end.
+    At −20 °C the capacity drops to ~2.6 kW (52% of 5 kW rated).  With
+    min_output_kw=4.37, the pump is capacity-constrained.  The COP for
+    a scheduled hour must equal the full-load COP, not the (better) min-load COP.
+    """
+    model = HeatPumpModel()
+    solver = MpcSolver(model)
+    config = MpcConfig(
+        min_lwt=35.0, max_lwt=35.0, max_tank_temp=55.0,
+        heat_pump_output_kw=5.0, tank_volume_liters=300.0,
+        lwt_step=5.0, tank_standby_loss_kwh=0.05,
+        min_output_kw=4.37,
+    )
+    # Single hour at −20 °C with enough demand to force the pump on.
+    horizon = [
+        HorizonPoint(price=1.0, t_outdoor=-20.0, rh=60.0, house_demand=2.0),
+    ]
+    result = solver.solve(horizon, 40.0, config)
+
+    # The pump must have run.
+    assert result.schedule[0].pump_on or result.schedule[0].heat_delivered_kwh > 0
+
+    # COP should be the full-load value, NOT inflated by modulation gain.
+    cop_full = model.get_effective_cop(-20.0, 60.0, 35.0)
+    cop_scheduled = result.schedule[0].cop_effective
+    # Allow small tolerance — but it must NOT be significantly higher than full-load.
+    assert cop_scheduled <= cop_full + 0.05, (
+        f"COP {cop_scheduled:.3f} exceeds full-load COP {cop_full:.3f} — "
+        f"modulation gain incorrectly applied at capacity-limited conditions."
+    )
+
+
+def test_sh_dhw_conflict_resolution():
+    """O2: When DHW Phase 1 blocks hours that SH needs, the solver retries
+    without DHW and produces a feasible SH schedule.
+
+    Setup: 4 hours of moderate SH demand with a 300 L tank (min_lwt=35,
+    max=55).  DHW Phase 1 books 2 hours for a ready-by constraint.  With
+    only 2 remaining hours for SH the schedule is infeasible.  The conflict
+    resolution drops DHW and retries — all 4 hours become available for SH,
+    making the schedule feasible.
+    """
+    config = MpcConfig(
+        min_lwt=35.0, max_lwt=55.0, max_tank_temp=55.0,
+        heat_pump_output_kw=5.0, tank_volume_liters=300.0,
+        lwt_step=5.0, tank_standby_loss_kwh=0.05, min_output_kw=2.0,
+        dhw_enabled=True, dhw_tank_volume_liters=180.0,
+        dhw_min_temp=40.0, dhw_target_temp=55.0, dhw_lwt=55.0,
+        dhw_ready_by_hours=[1],  # DHW must be ready at hour 1
+    )
+    # SH demand needs 3+ of the 4 hours to stay feasible.
+    demand = 4.0
+    horizon = [
+        HorizonPoint(price=1.0, t_outdoor=5.0, rh=60.0, house_demand=demand, dhw_demand=1.0),
+        HorizonPoint(price=1.0, t_outdoor=5.0, rh=60.0, house_demand=demand, dhw_demand=1.0),
+        HorizonPoint(price=1.0, t_outdoor=5.0, rh=60.0, house_demand=demand, dhw_demand=1.0),
+        HorizonPoint(price=1.0, t_outdoor=5.0, rh=60.0, house_demand=demand, dhw_demand=1.0),
+    ]
+
+    solver = MpcSolver(MockHeatPumpModel())
+    # SH tank at 45 °C (some stored energy); DHW tank starts low.
+    result = solver.solve(horizon, 45.0, config, dhw_tank_temp_init=41.0)
+
+    # The solver must produce a feasible schedule (DHW may be dropped).
+    assert result.feasible, (
+        "SH/DHW conflict resolution failed — schedule should be feasible "
+        "after dropping DHW constraints."
+    )
+
+
+def test_coil_in_tank_drains_tank_faster():
+    """Coil-in-tank: spiral demand drains the SH tank alongside house demand.
+
+    Simulate the tank with and without coil demand using the same pump
+    schedule.  The coil scenario must end with lower tank energy because
+    the spiral draws additional heat.
+    """
+    config_coil = MpcConfig(
+        min_lwt=35.0, max_lwt=55.0, max_tank_temp=55.0,
+        heat_pump_output_kw=5.0, tank_volume_liters=300.0,
+        lwt_step=5.0, tank_standby_loss_kwh=0.05, min_output_kw=2.0,
+        coil_in_tank=True,
+    )
+    config_no_coil = MpcConfig(
+        min_lwt=35.0, max_lwt=55.0, max_tank_temp=55.0,
+        heat_pump_output_kw=5.0, tank_volume_liters=300.0,
+        lwt_step=5.0, tank_standby_loss_kwh=0.05, min_output_kw=2.0,
+        coil_in_tank=False,
+    )
+    horizon_coil = [
+        HorizonPoint(price=1.0, t_outdoor=5.0, rh=60.0, house_demand=1.0, dhw_demand=0.5)
+        for _ in range(4)
+    ]
+    horizon_no = [
+        HorizonPoint(price=1.0, t_outdoor=5.0, rh=60.0, house_demand=1.0, dhw_demand=0.5)
+        for _ in range(4)
+    ]
+    metrics = [{"effective_output_kw": 5.0, "max_capacity_kw": 5.0}] * 4
+    pump_on = [True, False, False, False]
+    kwh_per_k = 300 * 1.16e-3
+    init_energy = (45.0 - 35.0) * kwh_per_k  # 3.48 kWh
+
+    solver = MpcSolver(MockHeatPumpModel())
+    states_coil, _ = solver._simulate(horizon_coil, metrics, pump_on, config_coil, init_energy, lwt=55.0)
+    states_no, _ = solver._simulate(horizon_no, metrics, pump_on, config_no_coil, init_energy, lwt=55.0)
+
+    # With coil: tank drains 0.5 kWh/h faster.
+    for t in range(4):
+        assert states_coil[t]["tank_end"] < states_no[t]["tank_end"], (
+            f"Hour {t}: coil tank_end ({states_coil[t]['tank_end']:.2f}) "
+            f"should be lower than no-coil ({states_no[t]['tank_end']:.2f})."
+        )
+
+
+def test_coil_in_tank_ready_by_constraint():
+    """Coil-in-tank ready-by: SH tank must hold reserve energy at specified hours.
+
+    With coil_reserve_kwh = 2.0 and ready-by at hour 2, the solver must
+    ensure the SH tank has >= 2.0 kWh at the end of hour 2.
+    """
+    config = MpcConfig(
+        min_lwt=35.0, max_lwt=55.0, max_tank_temp=55.0,
+        heat_pump_output_kw=5.0, tank_volume_liters=300.0,
+        lwt_step=5.0, tank_standby_loss_kwh=0.05, min_output_kw=2.0,
+        coil_in_tank=True,
+        coil_ready_by_hours=[2],
+        coil_reserve_kwh=2.0,
+    )
+    horizon = [
+        HorizonPoint(price=1.0, t_outdoor=5.0, rh=60.0, house_demand=1.5, dhw_demand=0.3)
+        for _ in range(6)
+    ]
+
+    solver = MpcSolver(MockHeatPumpModel())
+    # Start with low tank energy so the solver must charge to meet reserve.
+    result = solver.solve(horizon, 37.0, config)
+
+    assert result.feasible, "Schedule should be feasible with coil reserve constraint."
+    # Check that tank energy at end of hour 2 meets the reserve.
+    tank_at_ready = result.schedule[2].tank_energy_kwh
+    assert tank_at_ready >= 2.0 - 0.1, (
+        f"Tank energy at ready-by hour 2 is {tank_at_ready:.2f} kWh, "
+        f"expected >= 2.0 kWh (coil_reserve_kwh)."
+    )
+
+
+def test_coil_no_mode_switching():
+    """Coil-in-tank must never schedule DHW mode hours — always SH.
+
+    Even with dhw_demand > 0, coil_in_tank mode must not produce any
+    dhw_on=True hours because there is no separate DHW mode.
+    """
+    config = MpcConfig(
+        min_lwt=35.0, max_lwt=55.0, max_tank_temp=55.0,
+        heat_pump_output_kw=5.0, tank_volume_liters=300.0,
+        lwt_step=5.0, tank_standby_loss_kwh=0.05, min_output_kw=2.0,
+        coil_in_tank=True,
+        # dhw_enabled is False (coil mode, no separate tank)
+    )
+    horizon = [
+        HorizonPoint(price=1.0, t_outdoor=5.0, rh=60.0, house_demand=1.0, dhw_demand=0.5)
+        for _ in range(6)
+    ]
+
+    solver = MpcSolver(MockHeatPumpModel())
+    result = solver.solve(horizon, 40.0, config)
+
+    dhw_hours = sum(1 for p in result.schedule if p.dhw_on)
+    assert dhw_hours == 0, (
+        f"Coil mode should never schedule DHW hours, but found {dhw_hours}."
+    )
+
+
 def test_dhw_phase2_does_not_starve_sh():
     """DHW Phase 2 must not book every hour for DHW maintenance.
 

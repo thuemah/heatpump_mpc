@@ -1,0 +1,197 @@
+# Heat Pump MPC — Schedule Overview Card
+#
+# Plotly card for Home Assistant that visualises the MPC solver's hourly plan.
+# Requires the custom:plotly-graph card (HACS).
+#
+# Four indicators:
+#   1. Thermal output (bars, coloured by cost_per_kwh_heat)
+#   2. Buffer tank temperature (line, right axis)
+#   3. COP per hour (line, right axis)
+#   4. DHW hours (markers on the x-axis)
+#
+# The x-axis shows clock hours (e.g. "14:00") derived from the current time
+# plus each slot's hour_index offset.
+#
+# Install: copy this YAML into a Manual card in your Lovelace dashboard,
+# or paste it into a dashboard YAML file under `views: → cards:`.
+
+type: custom:plotly-graph
+refresh_interval: 300
+raw_plotly_config: true
+config:
+  displayModeBar: false
+layout:
+  showlegend: true
+  legend:
+    orientation: h
+    x: 0
+    "y": 1.18
+    font:
+      size: 11
+  xaxis:
+    title: ""
+    tickangle: 0
+    gridcolor: rgba(128, 128, 128, 0.15)
+    dtick: 4
+  yaxis:
+    title: Output (kW)
+    side: left
+    gridcolor: rgba(128, 128, 128, 0.15)
+    zeroline: true
+    rangemode: tozero
+  yaxis2:
+    title: "°C / COP"
+    side: right
+    overlaying: "y"
+    showgrid: false
+  paper_bgcolor: rgba(0,0,0,0)
+  plot_bgcolor: rgba(0,0,0,0)
+  font:
+    color: var(--primary-text-color)
+  margin:
+    l: 45
+    r: 50
+    t: 30
+    b: 40
+  hovermode: x unified
+  bargap: 0.08
+entities:
+  # ------------------------------------------------------------------
+  # 1. THERMAL OUTPUT (bars, coloured by cost per kWh of heat)
+  # ------------------------------------------------------------------
+  - entity: sensor.heat_pump_mpc_optimal_flow_temperature
+    name: Output
+    type: bar
+    opacity: 0.85
+    marker:
+      color: |
+        $fn ({ hass }) => {
+          const s = hass.states['sensor.heat_pump_mpc_optimal_flow_temperature'];
+          const schedule = s?.attributes?.schedule || [];
+          return schedule.map(h => h.pump_on ? h.cost_per_kwh_heat : null);
+        }
+      colorscale: [[0, '#2e7d32'], [0.5, '#fdd835'], [1, '#c62828']]
+      showscale: true
+      colorbar:
+        title:
+          text: "kr/kWh<sub>th</sub>"
+          font:
+            size: 10
+        thickness: 8
+        outlinewidth: 0
+        len: 0.6
+        x: 1.12
+        tickfont:
+          size: 9
+    x: |
+      $fn ({ hass }) => {
+        const s = hass.states['sensor.heat_pump_mpc_optimal_flow_temperature'];
+        const schedule = s?.attributes?.schedule || [];
+        const now = new Date();
+        now.setMinutes(0, 0, 0);
+        return schedule.map(h => {
+          const t = new Date(now.getTime() + h.hour * 3600000);
+          return t.getHours().toString().padStart(2, '0') + ':00';
+        });
+      }
+    "y": |
+      $fn ({ hass }) => {
+        const s = hass.states['sensor.heat_pump_mpc_optimal_flow_temperature'];
+        const schedule = s?.attributes?.schedule || [];
+        return schedule.map(h => h.pump_on ? h.output_kw : 0);
+      }
+    hovertemplate: "<b>%{y:.1f} kW</b>  ·  %{marker.color:.3f} kr/kWh<sub>th</sub><extra></extra>"
+
+  # ------------------------------------------------------------------
+  # 2. BUFFER TANK TEMPERATURE (line, right axis)
+  # ------------------------------------------------------------------
+  - entity: sensor.heat_pump_mpc_optimal_flow_temperature
+    name: Tank
+    type: scatter
+    mode: lines
+    yaxis: y2
+    line:
+      color: "#42a5f5"
+      width: 2.5
+      shape: spline
+    x: |
+      $fn ({ hass }) => {
+        const s = hass.states['sensor.heat_pump_mpc_optimal_flow_temperature'];
+        const schedule = s?.attributes?.schedule || [];
+        const now = new Date();
+        now.setMinutes(0, 0, 0);
+        return schedule.map(h => {
+          const t = new Date(now.getTime() + h.hour * 3600000);
+          return t.getHours().toString().padStart(2, '0') + ':00';
+        });
+      }
+    "y": |
+      $fn ({ hass }) => {
+        const s = hass.states['sensor.heat_pump_mpc_optimal_flow_temperature'];
+        const schedule = s?.attributes?.schedule || [];
+        return schedule.map(h => h.tank_temp_c);
+      }
+    hovertemplate: "<b>%{y:.1f} °C</b><extra></extra>"
+
+  # ------------------------------------------------------------------
+  # 3. COP (line, right axis)
+  # ------------------------------------------------------------------
+  - entity: sensor.heat_pump_mpc_optimal_flow_temperature
+    name: COP
+    type: scatter
+    mode: lines
+    yaxis: y2
+    line:
+      color: "#66bb6a"
+      width: 2
+      dash: dot
+    x: |
+      $fn ({ hass }) => {
+        const s = hass.states['sensor.heat_pump_mpc_optimal_flow_temperature'];
+        const schedule = s?.attributes?.schedule || [];
+        const now = new Date();
+        now.setMinutes(0, 0, 0);
+        return schedule.map(h => {
+          const t = new Date(now.getTime() + h.hour * 3600000);
+          return t.getHours().toString().padStart(2, '0') + ':00';
+        });
+      }
+    "y": |
+      $fn ({ hass }) => {
+        const s = hass.states['sensor.heat_pump_mpc_optimal_flow_temperature'];
+        const schedule = s?.attributes?.schedule || [];
+        return schedule.map(h => h.pump_on ? h.cop : null);
+      }
+    hovertemplate: "<b>COP %{y:.2f}</b><extra></extra>"
+
+  # ------------------------------------------------------------------
+  # 4. DHW HOURS (markers at y=0 on pump-off/DHW hours)
+  # ------------------------------------------------------------------
+  - entity: sensor.heat_pump_mpc_optimal_flow_temperature
+    name: DHW
+    type: scatter
+    mode: markers
+    marker:
+      symbol: diamond
+      size: 10
+      color: "#ef5350"
+    x: |
+      $fn ({ hass }) => {
+        const s = hass.states['sensor.heat_pump_mpc_optimal_flow_temperature'];
+        const schedule = s?.attributes?.schedule || [];
+        const now = new Date();
+        now.setMinutes(0, 0, 0);
+        return schedule
+          .filter(h => h.dhw_on)
+          .map(h => {
+            const t = new Date(now.getTime() + h.hour * 3600000);
+            return t.getHours().toString().padStart(2, '0') + ':00';
+          });
+      }
+    "y": |
+      $fn ({ hass }) => {
+        const s = hass.states['sensor.heat_pump_mpc_optimal_flow_temperature'];
+        const schedule = s?.attributes?.schedule || [];
+        return schedule.filter(h => h.dhw_on).map(() => 0);
+      }
+    hovertemplate: "<b>DHW</b><extra></extra>"

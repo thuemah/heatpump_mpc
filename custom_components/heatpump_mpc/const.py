@@ -3,6 +3,37 @@
 DOMAIN = "heatpump_mpc"
 
 # ---------------------------------------------------------------------------
+# Operation mode
+# ---------------------------------------------------------------------------
+
+CONF_OPERATION_MODE = "operation_mode"
+"""``"full_mpc"`` runs the scheduler + COP learning.
+``"cop_only"`` disables the scheduler and exposes COP learning + reporting
+only (no tank, LWT, DHW, or schedule configuration needed)."""
+
+OP_MODE_FULL_MPC = "full_mpc"
+OP_MODE_COP_ONLY = "cop_only"
+
+# ---------------------------------------------------------------------------
+# Heat pump type and refrigerant
+# ---------------------------------------------------------------------------
+
+CONF_HP_TYPE = "hp_type"
+"""Heat pump type: ``"ashp"`` (air-to-water), ``"gshp"`` (water-to-water /
+ground source), ``"a2a"`` (air-to-air, COP-only)."""
+
+HP_TYPE_ASHP = "ashp"
+HP_TYPE_GSHP = "gshp"
+HP_TYPE_A2A = "a2a"
+
+CONF_REFRIGERANT = "refrigerant"
+"""Refrigerant type: ``"r290"``, ``"r32"``, ``"r410a"``, ``"other"``."""
+
+CONF_BRINE_TEMP_SENSOR = "brine_temp_sensor"
+"""Sensor reporting brine inlet temperature (°C) for GSHP installations.
+Used as the source temperature for COP calculation instead of outdoor temp."""
+
+# ---------------------------------------------------------------------------
 # Config entry keys (what the user configures)
 # ---------------------------------------------------------------------------
 
@@ -103,6 +134,14 @@ FLOW_UNIT_M3H = "m³/h"
 CONF_DHW_ENABLED = "dhw_enabled"
 """True when the DHW scheduling and COP-filter features are active."""
 
+CONF_DHW_MODE = "dhw_mode"
+"""Selects the DHW topology: ``"separate_tank"`` (classic: dedicated DHW
+tank with mode-switching) or ``"coil_in_tank"`` (spiral in the SH buffer
+tank — no mode-switching, spiral demand is an additional SH-tank load)."""
+
+DHW_MODE_SEPARATE = "separate_tank"
+DHW_MODE_COIL = "coil_in_tank"
+
 CONF_DHW_TEMP_SENSOR = "dhw_temp_sensor"
 """Sensor reporting current DHW tank temperature (°C).
 Used for the COP-contamination filter and to initialise the DHW tank model."""
@@ -137,6 +176,15 @@ heated (e.g. ``07:00, 18:00``).  At each listed time the scheduler enforces a
 hard constraint that the tank is at ≥ 90 % of its target energy.
 Leave blank to disable (only the never-empty constraint applies)."""
 
+# Coil-in-tank specific
+CONF_COIL_ENERGY_SENSOR = "coil_energy_sensor"
+"""Cumulative energy sensor (kWh) on the DHW spiral circuit.
+Used to correct Track C (subtract spiral load from SH accumulation)."""
+
+CONF_COIL_DAILY_DEMAND_KWH = "coil_daily_demand_kwh"
+"""Estimated daily thermal energy drawn through the DHW spiral (kWh_th/day).
+Distributed uniformly over 24 h as additional SH-tank demand."""
+
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
@@ -170,6 +218,8 @@ DEFAULT_DHW_LWT = 55.0                # °C — fixed LWT during DHW mode
 DEFAULT_DHW_DAILY_DEMAND_KWH = 3.5    # kWh_th per day
 DEFAULT_DHW_TANK_TEMP = 50.0          # °C — fallback when DHW sensor is unavailable
 DEFAULT_DHW_READY_TIMES = ""          # empty = no ready-by constraints
+DEFAULT_DHW_MODE = DHW_MODE_SEPARATE  # classic separate-tank mode
+DEFAULT_COIL_DAILY_DEMAND_KWH = 5.0   # kWh_th per day — typical spiral load
 
 # Heating curve reference outdoor temperatures (fixed, not user-configurable)
 HEATING_CURVE_T_COLD: float = -10.0   # °C — design cold point
@@ -252,3 +302,9 @@ Heating Analytics can derive an hourly delta by comparing successive values."""
 SERVICE_GET_SH_HOURLY = "get_sh_hourly"
 """Service that returns a rolling buffer of completed per-hour SH thermal energy
 records.  Heating Analytics calls this to retrieve actual COP/energy data."""
+
+SERVICE_GET_COP_PARAMS = "get_cop_params"
+"""Service that returns the current COP model parameters (η_Carnot, f_defrost,
+thresholds, and the current LWT setpoint).  Heating Analytics uses these to
+compute per-hour COP in the Track C midnight sync, replacing the less accurate
+daily-average COP."""

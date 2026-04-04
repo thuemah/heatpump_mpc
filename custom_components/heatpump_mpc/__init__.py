@@ -10,7 +10,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
 
-from .const import DOMAIN, SERVICE_GET_SH_HOURLY
+from .const import DOMAIN, SERVICE_GET_SH_HOURLY, SERVICE_GET_COP_PARAMS
 from .coordinator import HeatpumpMpcCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -72,6 +72,57 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             supports_response=SupportsResponse.ONLY,
         )
 
+    # Register the get_cop_params service once (shared across all instances).
+    if not hass.services.has_service(DOMAIN, SERVICE_GET_COP_PARAMS):
+
+        async def handle_get_cop_params(call: ServiceCall) -> dict:
+            """Return the current COP model parameters for the requested instance.
+
+            Heating Analytics uses these to compute per-hour COP in the
+            Track C midnight sync — replacing the less accurate daily-average
+            COP with physics-based per-hour estimates.
+
+            Returns η_Carnot, f_defrost, defrost thresholds, and the current
+            LWT setpoint so the caller can evaluate:
+                COP(h) = η × COP_Carnot(T[h], LWT) × f_defrost_if_icing(T[h], RH[h])
+            """
+            entry_id: str | None = call.data.get("entry_id")
+            instances: dict = hass.data.get(DOMAIN, {})
+
+            if entry_id:
+                coord = instances.get(entry_id)
+                if coord is None:
+                    raise HomeAssistantError(
+                        f"No Heat Pump MPC instance with entry_id {entry_id!r}"
+                    )
+            else:
+                coordinators = list(instances.values())
+                if not coordinators:
+                    raise HomeAssistantError("No Heat Pump MPC instances installed.")
+                if len(coordinators) > 1:
+                    raise HomeAssistantError(
+                        "Multiple Heat Pump MPC instances are installed. "
+                        "Provide 'entry_id' to select the correct instance."
+                    )
+                coord = coordinators[0]
+
+            state = coord.learner_state
+            return {
+                "eta_carnot": round(state.eta_carnot, 4),
+                "f_defrost": round(state.f_defrost, 4),
+                "defrost_temp_threshold": state.defrost_t_threshold,
+                "defrost_rh_threshold": state.defrost_rh_threshold,
+                "lwt": coord.current_lwt,
+            }
+
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_GET_COP_PARAMS,
+            handle_get_cop_params,
+            schema=vol.Schema({vol.Optional("entry_id"): str}),
+            supports_response=SupportsResponse.ONLY,
+        )
+
     return True
 
 
@@ -83,4 +134,5 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Remove the shared service when the last instance is unloaded.
         if not hass.data[DOMAIN]:
             hass.services.async_remove(DOMAIN, SERVICE_GET_SH_HOURLY)
+            hass.services.async_remove(DOMAIN, SERVICE_GET_COP_PARAMS)
     return unload_ok

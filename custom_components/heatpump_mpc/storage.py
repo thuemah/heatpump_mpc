@@ -185,6 +185,7 @@ class HeatpumpMpcStorage:
         learner_state: CopLearnerState,
         sh_total_kwh_th: float,
         sh_hourly_buffer: list[dict],
+        sh_pending_hour: dict | None = None,
     ) -> None:
         """
         Schedule a debounced write of all persistent state (sync, safe to call
@@ -193,13 +194,39 @@ class HeatpumpMpcStorage:
         Combines learner parameters and SH hourly buffer into one write.
         Rapid successive calls coalesce into a single disk write after
         ``_SAVE_DELAY_S`` seconds.
+
+        Parameters
+        ----------
+        sh_pending_hour:
+            Snapshot of the in-progress hour accumulator so that it survives
+            HA restarts.  Keys: ``hour_start`` (ISO string), ``kwh_th``,
+            ``kwh_el``, ``sh_windows``, ``dhw_windows``.
+            Pass ``None`` to omit (backward-compatible).
         """
         # Capture values in a local dict so the lambda does not close over
         # mutable references that could change before the write fires.
-        snapshot = {
+        snapshot: dict = {
             "version": STORAGE_VERSION,
             "learner": learner_state.to_dict(),
             "sh_total_kwh_th": sh_total_kwh_th,
             "sh_hourly_buffer": list(sh_hourly_buffer),
         }
+        if sh_pending_hour is not None:
+            snapshot["sh_pending_hour"] = sh_pending_hour
         self._store.async_delay_save(lambda: snapshot, _SAVE_DELAY_S)
+
+    async def async_load_sh_pending_hour(self) -> dict | None:
+        """Load the in-progress hour accumulator snapshot from disk.
+
+        Returns ``None`` when no pending hour has been saved (first run or
+        clean hour boundary).
+        """
+        try:
+            raw: dict | None = await self._store.async_load()
+        except Exception:
+            return None
+
+        if raw is None:
+            return None
+
+        return raw.get("sh_pending_hour")

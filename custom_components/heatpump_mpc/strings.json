@@ -9,13 +9,39 @@
           "description": "Optional. The config entry ID of the target Heat Pump MPC instance. Required only when multiple MPC instances are installed. Leave blank to target the single installed instance."
         }
       }
+    },
+    "get_cop_params": {
+      "name": "Get COP Model Parameters",
+      "description": "Returns the current COP model parameters: learned Carnot efficiency (η_Carnot), defrost penalty factor (f_defrost), defrost condition thresholds, and the current LWT setpoint. Heating Analytics uses these to compute per-hour COP in the Track C midnight sync via: COP(h) = η_Carnot × COP_Carnot(T[h], LWT) × f_defrost(T[h], RH[h]).",
+      "fields": {
+        "entry_id": {
+          "name": "Config Entry ID",
+          "description": "Optional. The config entry ID of the target Heat Pump MPC instance. Required only when multiple MPC instances are installed. Leave blank to target the single installed instance."
+        }
+      }
     }
   },
   "config": {
     "step": {
       "user": {
+        "title": "System Setup",
+        "description": "Configure the type of heat pump, refrigerant, and operation mode. These choices determine which configuration steps follow.",
+        "data": {
+          "operation_mode": "Operation Mode",
+          "hp_type": "Heat Pump Type",
+          "refrigerant": "Refrigerant",
+          "brine_temp_sensor": "Brine Inlet Temperature Sensor"
+        },
+        "data_description": {
+          "operation_mode": "'Full MPC' runs the cost optimizer and COP learning. 'COP monitor' disables the scheduler and only learns and reports COP — ideal for getting started or for air-to-air units without a buffer tank.",
+          "hp_type": "Air-to-water (ASHP): source is outdoor air. Water-to-water (GSHP): source is a ground loop / brine circuit. Air-to-air: COP monitor only (no buffer tank).",
+          "refrigerant": "Determines cold-start COP priors. The system learns the real values from your sensors — this just speeds up initial convergence. Select 'Other' if unsure.",
+          "brine_temp_sensor": "GSHP only. Sensor reporting brine inlet temperature (°C). Used as the source temperature for COP calculation instead of outdoor air temperature."
+        }
+      },
+      "data_sources": {
         "title": "Data Sources",
-        "description": "Connect Heat Pump MPC to your existing integrations. These sensors provide the baseline data needed to optimize your heat pump's schedule.",
+        "description": "Connect to your existing integrations. These sensors provide the data needed for COP learning and schedule optimization.",
         "data": {
           "ha_entity_id": "Heating Analytics Entity",
           "price_sensor": "Electricity Price Sensor",
@@ -47,9 +73,9 @@
         "data_description": {
           "heat_pump_output_kw": "Rated heating capacity at full inverter load in kW (check your datasheet).",
           "min_output_kw": "Minimum thermal output at the lowest inverter speed in kW. The scheduler will test both minimum and full output to find the cheapest way to deliver heat.",
-          "min_lwt": "The absolute lowest flow temperature the heat pump should ever target.",
-          "max_lwt": "The highest flow temperature the heat pump is allowed to target.",
-          "max_tank_temp": "The scheduler will stop charging the buffer tank before it exceeds this temperature to prevent overheating.",
+          "min_lwt": "The absolute lowest flow temperature the optimizer will consider. Also defines the zero-energy reference for the tank model.",
+          "max_lwt": "The highest flow temperature the optimizer will evaluate. Can be higher than the tank ceiling if your system has a mixing/shunt valve, or lower if you want to limit the search range.",
+          "max_tank_temp": "Independent safety ceiling for the buffer tank. Charging stops at this temperature regardless of LWT. Set this based on your distribution system (e.g. 45 °C for underfloor heating, 55 °C for radiators). Can be above, below, or equal to max LWT.",
           "tank_volume_liters": "Thermal storage capacity expressed as equivalent water volume (liters). For a standard buffer tank: enter the actual volume. For concrete thermal mass (e.g. heated slab): divide its heat capacity by 1.16 Wh/L\u00b7K \u2014 30 tonnes of concrete \u2248 6000 L equivalent. For systems without hydraulic separation: enter the approximate pipe volume (minimum 10 L).",
           "lwt_heating_cold": "Target flow temperature at \u221210 \u00b0C outdoors (from your heating curve). Used to understand the heat transfer capabilities of your floors or radiators.",
           "lwt_heating_mild": "Target flow temperature at +10 \u00b0C outdoors. This, along with the cold setpoint, defines the slope of your heating curve.",
@@ -59,7 +85,7 @@
       },
       "learning": {
         "title": "COP Learning & Calibration",
-        "description": "Provide real-time measurement sensors to allow the integration to learn the true efficiency (COP) of your specific heat pump over time, replacing static factory estimates.\n\nAll fields are optional, but adding more sensors improves optimization accuracy.",
+        "description": "Provide real-time measurement sensors to allow the integration to learn the true efficiency (COP) of your specific heat pump over time, replacing static factory estimates.\n\nThe electrical energy sensor is required for COP learning and SH energy tracking. The thermal power sensor (or flow sensors) is optional but greatly improves COP calibration accuracy.",
         "data": {
           "electrical_energy_sensor": "Electrical Energy Sensor",
           "thermal_power_sensor": "Thermal Power Sensor (Heat Meter)",
@@ -96,8 +122,24 @@
         }
       },
       "reconfigure": {
+        "title": "Edit: System Setup",
+        "description": "Change the heat pump type, refrigerant, or operation mode. This may add or remove subsequent configuration steps.",
+        "data": {
+          "operation_mode": "Operation Mode",
+          "hp_type": "Heat Pump Type",
+          "refrigerant": "Refrigerant",
+          "brine_temp_sensor": "Brine Inlet Temperature Sensor"
+        },
+        "data_description": {
+          "operation_mode": "'Full MPC' runs the cost optimizer and COP learning. 'COP monitor' disables the scheduler and only learns and reports COP.",
+          "hp_type": "Air-to-water (ASHP), Water-to-water (GSHP), or Air-to-air (COP monitor only).",
+          "refrigerant": "Determines cold-start priors. Select 'Other' if unsure.",
+          "brine_temp_sensor": "GSHP only. Brine inlet temperature sensor."
+        }
+      },
+      "reconfigure_data_sources": {
         "title": "Edit: Data Sources",
-        "description": "Update the core sensors and weather provider that the optimizer uses.",
+        "description": "Update the core sensors and weather provider.",
         "data": {
           "ha_entity_id": "Heating Analytics Entity",
           "price_sensor": "Electricity Price Sensor",
@@ -129,9 +171,9 @@
         "data_description": {
           "heat_pump_output_kw": "Rated heating capacity at full inverter load in kW (check your datasheet).",
           "min_output_kw": "Minimum thermal output at the lowest inverter speed in kW. The scheduler will test both minimum and full output to find the cheapest way to deliver heat.",
-          "min_lwt": "The absolute lowest flow temperature the heat pump should ever target.",
-          "max_lwt": "The highest flow temperature the heat pump is allowed to target.",
-          "max_tank_temp": "The scheduler will stop charging the buffer tank before it exceeds this temperature to prevent overheating.",
+          "min_lwt": "The absolute lowest flow temperature the optimizer will consider. Also defines the zero-energy reference for the tank model.",
+          "max_lwt": "The highest flow temperature the optimizer will evaluate. Can be higher than the tank ceiling if your system has a mixing/shunt valve, or lower if you want to limit the search range.",
+          "max_tank_temp": "Independent safety ceiling for the buffer tank. Charging stops at this temperature regardless of LWT. Set this based on your distribution system (e.g. 45 °C for underfloor heating, 55 °C for radiators). Can be above, below, or equal to max LWT.",
           "tank_volume_liters": "Thermal storage capacity expressed as equivalent water volume (liters). For a standard buffer tank: enter the actual volume. For concrete thermal mass (e.g. heated slab): divide its heat capacity by 1.16 Wh/L\u00b7K \u2014 30 tonnes of concrete \u2248 6000 L equivalent. For systems without hydraulic separation: enter the approximate pipe volume (minimum 10 L).",
           "lwt_heating_cold": "Target flow temperature at \u221210 \u00b0C outdoors (from your heating curve). Used to understand the heat transfer capabilities of your floors or radiators.",
           "lwt_heating_mild": "Target flow temperature at +10 \u00b0C outdoors. This, along with the cold setpoint, defines the slope of your heating curve.",
@@ -176,6 +218,9 @@
         "description": "Optional: let the MPC schedule DHW reheating in the cheapest hours and prevent the heat pump from running DHW at expensive times.\n\nEnable this only if your heat pump has a separate DHW tank and you can control the DHW target temperature setpoint from Home Assistant.",
         "data": {
           "dhw_enabled": "Enable DHW Scheduling",
+          "dhw_mode": "DHW Topology",
+          "coil_energy_sensor": "Spiral Energy Sensor (optional)",
+          "coil_daily_demand_kwh": "Daily Spiral Demand",
           "dhw_temp_sensor": "DHW Tank Temperature Sensor",
           "dhw_operation_sensor": "DHW Operation Sensor (optional)",
           "dhw_tank_volume_liters": "DHW Tank Volume",
@@ -187,6 +232,9 @@
         },
         "data_description": {
           "dhw_enabled": "Enable DHW tank scheduling and COP contamination filtering.",
+          "dhw_mode": "Select your DHW topology. 'Separate tank': dedicated DHW tank with mode-switching (heat pump alternates between SH and DHW). 'Coil in tank': DHW spiral inside the SH buffer tank — the heat pump always runs in SH mode and the spiral passively extracts heat at the current tank temperature.",
+          "coil_energy_sensor": "Optional. Cumulative energy sensor (kWh) on the DHW spiral circuit. Used to subtract spiral load from the SH thermal energy reported to Heating Analytics, preventing it from learning spiral demand as building heat loss.",
+          "coil_daily_demand_kwh": "Estimated thermal energy drawn through the DHW spiral per day (kWh). Distributed uniformly over 24 hours as additional SH-tank demand in the solver.",
           "dhw_temp_sensor": "Sensor reporting the current temperature of the DHW tank. Used to initialise the tank model and to detect when the heat pump is running in DHW mode (COP filter).",
           "dhw_operation_sensor": "Optional. A binary sensor that reads On when the heat pump is actively heating the DHW tank (e.g. a mode or status sensor from the heat pump integration). When configured, this is used as the primary DHW contamination signal for COP learning \u2014 more reliable than temperature-rise detection, especially when the tank is near its target temperature. Leave blank to use the temperature-rise fallback only.",
           "dhw_tank_volume_liters": "Volume of your DHW storage tank in litres.",
@@ -202,6 +250,9 @@
         "description": "Update DHW tank scheduling settings.",
         "data": {
           "dhw_enabled": "Enable DHW Scheduling",
+          "dhw_mode": "DHW Topology",
+          "coil_energy_sensor": "Spiral Energy Sensor (optional)",
+          "coil_daily_demand_kwh": "Daily Spiral Demand",
           "dhw_temp_sensor": "DHW Tank Temperature Sensor",
           "dhw_operation_sensor": "DHW Operation Sensor (optional)",
           "dhw_tank_volume_liters": "DHW Tank Volume",
@@ -213,6 +264,9 @@
         },
         "data_description": {
           "dhw_enabled": "Enable DHW tank scheduling and COP contamination filtering.",
+          "dhw_mode": "Select DHW topology: separate tank or coil-in-tank (spiral in the SH buffer).",
+          "coil_energy_sensor": "Optional. Cumulative energy sensor on the spiral circuit (for Track C correction).",
+          "coil_daily_demand_kwh": "Estimated daily thermal energy drawn through the spiral (kWh).",
           "dhw_temp_sensor": "Sensor reporting the current temperature of the DHW tank.",
           "dhw_operation_sensor": "Optional. Binary sensor that reads On when the HP is heating DHW. Leave blank to use temperature-rise detection only.",
           "dhw_tank_volume_liters": "Volume of your DHW storage tank in litres.",
@@ -226,7 +280,6 @@
     },
     "error": {
       "max_lwt_below_min": "Maximum flow temperature must be strictly higher than the minimum.",
-      "max_tank_below_max_lwt": "The tank safety ceiling must be at least as high as the maximum flow temperature.",
       "lwt_mild_above_cold": "Mild-weather flow temperature must be lower than the cold-weather flow temperature.",
       "min_output_above_max": "Minimum output must be strictly lower than the nominal full-load output.",
       "dhw_target_below_min": "DHW target temperature must be higher than the minimum temperature.",

@@ -170,6 +170,28 @@ class MpcConfig:
     list disables the feature (only the never-empty depletion constraint
     applies)."""
 
+    # ------------------------------------------------------------------
+    # Coil-in-tank (DHW spiral inside the SH buffer tank)
+    # ------------------------------------------------------------------
+
+    coil_in_tank: bool = False
+    """When True, DHW is provided by a spiral heat exchanger inside the SH
+    buffer tank.  No mode-switching occurs — the spiral demand is subtracted
+    from the SH tank simulation as an additional load alongside house_demand.
+    ``dhw_enabled`` and ``coil_in_tank`` are mutually exclusive; the
+    coordinator enforces this."""
+
+    coil_ready_by_hours: list[int] = field(default_factory=list)
+    """Horizon slot indices where the SH tank must hold enough reserve energy
+    for the spiral to cover expected DHW demand.  Same semantics as
+    ``dhw_ready_by_hours`` but the constraint applies to the SH tank
+    rather than a separate DHW tank."""
+
+    coil_reserve_kwh: float = 0.0
+    """Minimum SH-tank energy (kWh above min_lwt) required at each
+    ``coil_ready_by_hours`` slot.  Computed by the coordinator from the
+    daily spiral demand and typical draw pattern."""
+
 
 @dataclass
 class HourPlan:
@@ -388,8 +410,11 @@ class MpcSolver:
                     violation,
                 )
                 break
-            latest = candidates[-1]
-            dhw_on[latest] = True
+            # Pick the cheapest candidate (price / COP) instead of blindly
+            # choosing the latest.  This reduces DHW Phase 1 electricity cost
+            # while still satisfying the survival constraint.
+            cheapest = min(candidates, key=lambda t: horizon[t].price / dhw_cop[t])
+            dhw_on[cheapest] = True
 
         return dhw_on
 
@@ -660,6 +685,39 @@ class MpcSolver:
                 best_lwt = lwt
                 best_dhw_final = dhw_candidate
 
+        # ------------------------------------------------------------------
+        # SH/DHW conflict resolution: when all LWT candidates are infeasible
+        # and DHW Phase 1 booked hours that SH Phase 1 needed, retry the best
+        # LWT with DHW hours released so space-heating survival takes priority
+        # over DHW pre-heating.  The DHW tank may cool down, but the house
+        # will not freeze.
+        # ------------------------------------------------------------------
+        if not best_feasible and config.dhw_enabled and any(dhw_p1_blocked):
+            _LOGGER.warning(
+                "SH infeasible with DHW blocking %d hours — retrying all "
+                "LWT candidates without DHW constraints.",
+                sum(dhw_p1_blocked),
+            )
+            no_dhw = [False] * len(horizon)
+            for lwt in lwt_list:
+                retry_schedule, retry_cost, retry_feasible = self._solve_scenario(
+                    horizon, config, tank_energy_init, lwt, no_dhw
+                )
+                if not retry_feasible:
+                    continue
+                if not best_feasible or retry_cost < best_cost:
+                    best_schedule = retry_schedule
+                    best_cost = retry_cost
+                    best_feasible = True
+                    best_lwt = lwt
+                    best_dhw_final = no_dhw
+            if best_feasible:
+                _LOGGER.info(
+                    "SH/DHW conflict resolved at LWT %.0f °C: SH is now "
+                    "feasible; DHW scheduling dropped for this horizon.",
+                    best_lwt,
+                )
+
         dhw_final = best_dhw_final
 
         # optimal_output_kw: the action for the current hour (index 0).
@@ -818,9 +876,15 @@ class MpcSolver:
             for pt in horizon:
                 max_cap = self._model.get_max_output_at(pt.t_outdoor, lwt, max_kw)
                 eff = min(out_kw, max_cap)
+                # Pass physical capacity ceiling (max_cap) rather than rated
+                # output so the COP model knows when the pump is
+                # capacity-limited.  At extreme cold (e.g. −20 °C) max_cap
+                # can drop below min_kw; without this the interpolation
+                # would incorrectly assign min-load (best) COP to what is
+                # actually a full-load operating point.
                 cop = max(
                     self._model.get_cop_at_output(
-                        pt.t_outdoor, pt.rh, lwt, eff, max_kw, min_kw
+                        pt.t_outdoor, pt.rh, lwt, eff, max_cap, min_kw
                     ),
                     0.1,
                 )
@@ -1039,12 +1103,16 @@ class MpcSolver:
             0.0,
             kwh_per_k * (min(config.max_tank_temp, effective_lwt) - config.min_lwt),
         )
+        _coil_ready_set: set[int] = set(config.coil_ready_by_hours)
         tank = tank_energy_init
         feasible = True
         states: list[dict] = []
 
         for t, pt in enumerate(horizon):
             tank_start = tank
+
+            # Coil-in-tank: spiral demand is an additional SH-tank load.
+            coil_load = pt.dhw_demand if config.coil_in_tank else 0.0
 
             if pump_on[t]:
                 # Per-hour deliverable output (already clamped to physical capacity).
@@ -1061,7 +1129,10 @@ class MpcSolver:
                     # with a small buffer) where the tank saturates within minutes at
                     # full output: without accounting for demand drain, headroom stays
                     # zero for the rest of the horizon and the pump never runs again.
-                    effective_headroom = raw_headroom + pt.house_demand + config.tank_standby_loss_kwh
+                    effective_headroom = (
+                        raw_headroom + pt.house_demand + coil_load
+                        + config.tank_standby_loss_kwh
+                    )
                     heat_in = min(deliverable, effective_headroom)
                 else:
                     # Tank is above the LWT ceiling — the pump delivers cooler water
@@ -1070,9 +1141,22 @@ class MpcSolver:
             else:
                 heat_in = 0.0
 
-            tank_end = tank + heat_in - pt.house_demand - config.tank_standby_loss_kwh
+            tank_end = (
+                tank + heat_in
+                - pt.house_demand
+                - coil_load
+                - config.tank_standby_loss_kwh
+            )
 
             if tank_end < 0.0:
+                feasible = False
+
+            # Coil ready-by: SH tank must hold enough reserve for the spiral.
+            if (
+                config.coil_in_tank
+                and t in _coil_ready_set
+                and tank_end < config.coil_reserve_kwh
+            ):
                 feasible = False
 
             states.append(

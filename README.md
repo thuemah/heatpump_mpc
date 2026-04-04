@@ -20,15 +20,32 @@ These are the physical constraints of your system:
 *   **Nominal and Minimum Output (kW):** How much heat the heat pump provides at full throttle, and how low it can modulate down. The integration will evaluate both to find the cheapest option.
 *   **Leaving Water Temperature (LWT) Constraints:** Absolute minimum and maximum temperature the water from the heat pump can have.
 *   **Buffer Tank Volume:** The size of your tank in liters. This acts as a thermal battery. The integration can heat the tank extra before the electricity price goes up, as long as it does not exceed the **tank's safety ceiling**.
-*   **DHW (Domestic Hot Water) Tank:** If your heat pump also heats tap water, you can define a DHW tank. The integration can schedule DHW runs during cheap hours, avoiding periods where electricity is expensive, while ensuring the tank never falls below a minimum temperature. You can also specify "ready-by" times for when the tank must be fully heated.
+*   **DHW (Domestic Hot Water):** Two topologies are supported:
+    *   **Separate tank** (classic): The heat pump alternates between SH and DHW mode. DHW runs at a fixed (high) LWT. The integration schedules DHW during cheap hours while ensuring the tank never runs empty.
+    *   **Coil-in-tank** (spiral): A DHW spiral heat exchanger sits inside the SH buffer tank. The heat pump always runs in SH mode at optimal COP — the spiral passively extracts heat, and a downstream hot water heater covers the rest. No mode-switching, no COP penalty.
+    
+    Both topologies support "ready-by" times (e.g. "hot water ready by 07:00").
 *   **Heating Curve and Room Temperature:** By setting the desired temperature at -10 °C and +10 °C outside, the system understands how hot the water needs to be to keep the house at the desired indoor temperature. This prevents the integration from choosing an unrealistically low and efficient temperature that cannot heat the house.
 
-### 3. COP Learning & Calibration
+### 3. Sensor Protection
+The integration protects itself against corrupt, stale, or glitching sensor data — important because a single bad reading could poison the COP model or produce a nonsensical schedule:
+*   **Spike filter:** Electrical energy deltas that exceed the heat pump's physical maximum (rated electrical power × time window × 1.5) are silently dropped.
+*   **Plausibility checks:** Thermal power readings (from heat meter or flow × ΔT) above 2× rated thermal output are rejected. Tank temperatures outside 0–95 °C abort the solver run.
+*   **Staleness watchdog:** Buffer tank, DHW tank, and thermal power sensors are rejected if their `last_updated` timestamp exceeds 60 minutes — catches frozen Modbus registers or offline sensors that remain "available".
+*   **Flow sensor bounds:** Negative flow rates, ΔT > 25 K, and computed thermal power above 2× rated are treated as sensor faults.
+*   **SH accumulation cap:** Even if the spike filter is bypassed (e.g. `rated_max_elec_kw` not configured), the per-cycle thermal energy fed to Heating Analytics' Track C is capped at 2× rated thermal output.
+
+In all cases, bad readings are dropped and the baseline is updated — the next cycle starts clean.
+
+### 4. COP Learning & Calibration
 Instead of just guessing how efficient your heat pump is based on a datasheet, this integration can *learn* its actual efficiency (COP - Coefficient of Performance).
 *   By connecting sensors for **power consumption** (electrical energy) and **delivered heat** (thermal power via a heat meter, or flow meter and supply/return temperatures), the system will continuously adjust its expectations.
 *   Capacity derating at low outdoor temperatures is learned implicitly: whenever the MPC decides to run at full output, the resulting heat delivery is used to update how much the pump can actually deliver at those conditions. No compressor frequency sensor is required.
 
-### 4. Optimization Tuning
+### 5. SH/DHW Conflict Resolution
+When both space heating and domestic hot water compete for the same hours and the SH schedule becomes infeasible, the solver automatically retries all LWT candidates without DHW constraints. Space heating survival always takes priority — the house will not freeze, even if the DHW tank cools down temporarily.
+
+### 6. Optimization Tuning
 *   **Horizon Hours:** How many hours ahead the system should plan. 24 hours is standard, but can be increased if the next day's electricity prices are available early.
 *   **Tank Standby Loss:** An estimate of how much heat the buffer tank loses to the surroundings per hour.
 *   **LWT Step:** How precisely the system should search for the best flow temperature. Smaller steps give more precision but require more computing power.

@@ -81,6 +81,21 @@ from .const import (
     CONF_DHW_LWT,
     CONF_DHW_DAILY_DEMAND_KWH,
     CONF_DHW_READY_TIMES,
+    CONF_DHW_MODE,
+    DHW_MODE_SEPARATE,
+    DHW_MODE_COIL,
+    CONF_COIL_ENERGY_SENSOR,
+    CONF_COIL_DAILY_DEMAND_KWH,
+    DEFAULT_COIL_DAILY_DEMAND_KWH,
+    CONF_OPERATION_MODE,
+    OP_MODE_FULL_MPC,
+    OP_MODE_COP_ONLY,
+    CONF_HP_TYPE,
+    HP_TYPE_ASHP,
+    HP_TYPE_GSHP,
+    HP_TYPE_A2A,
+    CONF_REFRIGERANT,
+    CONF_BRINE_TEMP_SENSOR,
     DEFAULT_WEATHER_ENTITY,
 
     DEFAULT_TANK_TEMP_SENSOR,
@@ -111,7 +126,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class HeatpumpMpcConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Four-step config flow for Heat Pump MPC."""
+    """Five-step config flow for Heat Pump MPC."""
 
     VERSION = 1
 
@@ -179,9 +194,34 @@ class HeatpumpMpcConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             CONF_FLOW_RATE_SENSOR,
             CONF_SUPPLY_TEMP_SENSOR,
             CONF_RETURN_TEMP_SENSOR,
+            CONF_DHW_OPERATION_SENSOR,
+            CONF_COIL_ENERGY_SENSOR,
+            CONF_BRINE_TEMP_SENSOR,
         ]
         for key in optional_entity_keys:
             if not data.get(key):
+                data.pop(key, None)
+
+        # Remove brine sensor when not GSHP.
+        if data.get(CONF_HP_TYPE) != HP_TYPE_GSHP:
+            data.pop(CONF_BRINE_TEMP_SENSOR, None)
+
+        # COP-only: strip all scheduler/tank/DHW keys.
+        if data.get(CONF_OPERATION_MODE) == OP_MODE_COP_ONLY:
+            for key in (
+                CONF_MIN_LWT, CONF_MAX_LWT, CONF_MAX_TANK_TEMP,
+                CONF_HEAT_PUMP_OUTPUT_KW, CONF_MIN_OUTPUT_KW,
+                CONF_TANK_VOLUME_L, CONF_LWT_STEP,
+                CONF_TANK_STANDBY_LOSS_KWH, CONF_HORIZON_HOURS,
+                CONF_START_PENALTY_KWH, CONF_LWT_HEATING_COLD,
+                CONF_LWT_HEATING_MILD, CONF_T_ROOM,
+                CONF_DHW_ENABLED, CONF_DHW_MODE,
+                CONF_DHW_TEMP_SENSOR, CONF_DHW_OPERATION_SENSOR,
+                CONF_DHW_TANK_VOLUME_L, CONF_DHW_MIN_TEMP,
+                CONF_DHW_TARGET_TEMP, CONF_DHW_LWT,
+                CONF_DHW_DAILY_DEMAND_KWH, CONF_DHW_READY_TIMES,
+                CONF_COIL_ENERGY_SENSOR, CONF_COIL_DAILY_DEMAND_KWH,
+            ):
                 data.pop(key, None)
 
         # If flow sensors are disabled, remove flow-sensor keys entirely
@@ -191,12 +231,25 @@ class HeatpumpMpcConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_RETURN_TEMP_SENSOR, CONF_FLOW_UNIT):
                 data.pop(key, None)
 
-        # If DHW is disabled, remove DHW-specific keys.
+        # If DHW is disabled, remove all DHW/coil-specific keys.
         if not data.get(CONF_DHW_ENABLED):
+            for key in (CONF_DHW_MODE, CONF_DHW_TEMP_SENSOR,
+                        CONF_DHW_OPERATION_SENSOR,
+                        CONF_DHW_TANK_VOLUME_L, CONF_DHW_MIN_TEMP,
+                        CONF_DHW_TARGET_TEMP, CONF_DHW_LWT,
+                        CONF_DHW_DAILY_DEMAND_KWH, CONF_DHW_READY_TIMES,
+                        CONF_COIL_ENERGY_SENSOR, CONF_COIL_DAILY_DEMAND_KWH):
+                data.pop(key, None)
+        elif data.get(CONF_DHW_MODE) == DHW_MODE_COIL:
+            # Coil mode: remove separate-tank keys.
             for key in (CONF_DHW_TEMP_SENSOR, CONF_DHW_OPERATION_SENSOR,
                         CONF_DHW_TANK_VOLUME_L, CONF_DHW_MIN_TEMP,
                         CONF_DHW_TARGET_TEMP, CONF_DHW_LWT,
-                        CONF_DHW_DAILY_DEMAND_KWH, CONF_DHW_READY_TIMES):
+                        CONF_DHW_DAILY_DEMAND_KWH):
+                data.pop(key, None)
+        else:
+            # Separate-tank mode: remove coil keys.
+            for key in (CONF_COIL_ENERGY_SENSOR, CONF_COIL_DAILY_DEMAND_KWH):
                 data.pop(key, None)
 
         return data
@@ -204,6 +257,56 @@ class HeatpumpMpcConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     # ------------------------------------------------------------------
     # Schema builders
     # ------------------------------------------------------------------
+
+    def _schema_system(self, user_input, defaults) -> vol.Schema:
+        """Step 1 — System gatekeeper: operation mode, HP type, refrigerant.
+
+        Early choices here determine which subsequent steps are shown.
+        COP-only skips tank/schedule/DHW; GSHP shows brine sensor.
+        """
+        g = lambda k, d=None: self._v(user_input, defaults, k, d)
+        hp_type = g(CONF_HP_TYPE, HP_TYPE_ASHP)
+
+        schema: dict = {
+            vol.Required(CONF_OPERATION_MODE, default=g(CONF_OPERATION_MODE, OP_MODE_FULL_MPC)): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[OP_MODE_FULL_MPC, OP_MODE_COP_ONLY],
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Required(CONF_HP_TYPE, default=hp_type): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[HP_TYPE_ASHP, HP_TYPE_GSHP, HP_TYPE_A2A],
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Required(CONF_REFRIGERANT, default=g(CONF_REFRIGERANT, "r290")): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=["r290", "r32", "r410a", "other"],
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            ),
+        }
+
+        # GSHP needs a brine temperature sensor.
+        if hp_type == HP_TYPE_GSHP:
+            schema[vol.Required(
+                CONF_BRINE_TEMP_SENSOR,
+                default=g(CONF_BRINE_TEMP_SENSOR, ""),
+            )] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor", device_class="temperature")
+            )
+
+        return vol.Schema(schema)
+
+    def _needs_reload_system(self, user_input: dict) -> bool:
+        """Re-render when HP type changes (GSHP shows/hides brine sensor)."""
+        hp_type = user_input.get(CONF_HP_TYPE, HP_TYPE_ASHP)
+        if hp_type == HP_TYPE_GSHP and CONF_BRINE_TEMP_SENSOR not in user_input:
+            return True
+        if hp_type != HP_TYPE_GSHP and CONF_BRINE_TEMP_SENSOR in user_input:
+            return True
+        return False
 
     def _schema_data_sources(self, user_input, defaults) -> vol.Schema:
         g = lambda k, d=None: self._v(user_input, defaults, k, d)
@@ -326,9 +429,13 @@ class HeatpumpMpcConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         Dynamic schema for the DHW step.
 
         When ``dhw_enabled`` is False (default) only the toggle is shown.
-        When True, the full set of DHW parameters appears.  The same
-        re-render trick as the learning step is used: the form refreshes
-        when the toggle changes so fields appear / disappear in place.
+        When True, a mode selector appears:
+        - **separate_tank**: classic dedicated DHW tank with mode-switching.
+        - **coil_in_tank**: DHW spiral inside the SH buffer tank — no
+          mode-switching, spiral demand is an additional SH-tank load.
+
+        The form re-renders when the toggle or mode changes so the correct
+        sub-fields appear / disappear in place.
         """
         g = lambda k, d=None: self._v(user_input, defaults, k, d)
         dhw_enabled = g(CONF_DHW_ENABLED, False)
@@ -337,7 +444,37 @@ class HeatpumpMpcConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             vol.Required(CONF_DHW_ENABLED, default=dhw_enabled): selector.BooleanSelector(),
         }
 
-        if dhw_enabled:
+        if not dhw_enabled:
+            return vol.Schema(schema)
+
+        dhw_mode = g(CONF_DHW_MODE, DHW_MODE_SEPARATE)
+        schema[vol.Required(CONF_DHW_MODE, default=dhw_mode)] = selector.SelectSelector(
+            selector.SelectSelectorConfig(
+                options=[DHW_MODE_SEPARATE, DHW_MODE_COIL],
+                mode=selector.SelectSelectorMode.DROPDOWN,
+            )
+        )
+
+        if dhw_mode == DHW_MODE_COIL:
+            # Coil-in-tank: spiral energy sensor + daily demand + ready-by
+            schema[vol.Optional(
+                CONF_COIL_ENERGY_SENSOR,
+                description={"suggested_value": g(CONF_COIL_ENERGY_SENSOR)},
+            )] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor", device_class="energy")
+            )
+            schema[vol.Required(
+                CONF_COIL_DAILY_DEMAND_KWH,
+                default=g(CONF_COIL_DAILY_DEMAND_KWH, DEFAULT_COIL_DAILY_DEMAND_KWH),
+            )] = selector.NumberSelector(
+                selector.NumberSelectorConfig(min=0.5, max=20.0, step=0.5, unit_of_measurement="kWh/day")
+            )
+            schema[vol.Optional(
+                CONF_DHW_READY_TIMES,
+                description={"suggested_value": g(CONF_DHW_READY_TIMES, DEFAULT_DHW_READY_TIMES)},
+            )] = selector.TextSelector(selector.TextSelectorConfig())
+        else:
+            # Separate tank: full DHW parameter set
             schema[vol.Required(
                 CONF_DHW_TEMP_SENSOR,
                 default=g(CONF_DHW_TEMP_SENSOR, ""),
@@ -392,13 +529,25 @@ class HeatpumpMpcConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         Return True when the DHW step must re-render to show/hide fields.
 
         Called with the just-submitted user_input before saving, so we
-        compare the new toggle value against what fields are present.
+        compare the new toggle / mode value against what fields are present.
         """
         dhw_enabled = user_input.get(CONF_DHW_ENABLED, False)
-        if dhw_enabled and CONF_DHW_TEMP_SENSOR not in user_input:
+        has_mode = CONF_DHW_MODE in user_input
+
+        # Toggle just changed: fields need to appear / disappear.
+        if dhw_enabled and not has_mode:
             return True
-        if not dhw_enabled and CONF_DHW_TEMP_SENSOR in user_input:
+        if not dhw_enabled and has_mode:
             return True
+
+        # Mode changed: the sub-fields for the new mode are not yet present.
+        if dhw_enabled and has_mode:
+            mode = user_input.get(CONF_DHW_MODE, DHW_MODE_SEPARATE)
+            if mode == DHW_MODE_COIL and CONF_COIL_DAILY_DEMAND_KWH not in user_input:
+                return True
+            if mode == DHW_MODE_SEPARATE and CONF_DHW_TEMP_SENSOR not in user_input:
+                return True
+
         return False
 
     def _schema_schedule(self, user_input, defaults) -> vol.Schema:
@@ -448,11 +597,8 @@ class HeatpumpMpcConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         min_lwt = float(user_input[CONF_MIN_LWT])
         max_lwt = float(user_input[CONF_MAX_LWT])
-        max_tank = float(user_input[CONF_MAX_TANK_TEMP])
         if max_lwt <= min_lwt:
             errors[CONF_MAX_LWT] = "max_lwt_below_min"
-        elif max_tank < max_lwt:
-            errors[CONF_MAX_TANK_TEMP] = "max_tank_below_max_lwt"
         lwt_cold = float(user_input[CONF_LWT_HEATING_COLD])
         lwt_mild = float(user_input[CONF_LWT_HEATING_MILD])
         if lwt_mild >= lwt_cold:
@@ -468,13 +614,31 @@ class HeatpumpMpcConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     # ------------------------------------------------------------------
 
     async def async_step_user(self, user_input=None) -> FlowResult:
-        """Step 1: data sources."""
+        """Step 1: system gatekeeper (operation mode, HP type, refrigerant)."""
+        if user_input is not None:
+            if self._needs_reload_system(user_input):
+                return self.async_show_form(
+                    step_id="user",
+                    data_schema=self._schema_system(user_input, self._flow_data),
+                )
+            self._flow_data.update(user_input)
+            return await self.async_step_data_sources()
+        return self.async_show_form(
+            step_id="user",
+            data_schema=self._schema_system(None, self._flow_data),
+        )
+
+    async def async_step_data_sources(self, user_input=None) -> FlowResult:
+        """Step 2: data sources (sensors, weather, price)."""
         if user_input is not None:
             self._flow_data.update(user_input)
             self._clear_absent_entity_keys(user_input, [CONF_PRICE_SENSOR, CONF_HA_ENTITY_ID])
+            # COP-only: skip heat pump/tank config, go straight to learning.
+            if self._flow_data.get(CONF_OPERATION_MODE) == OP_MODE_COP_ONLY:
+                return await self.async_step_learning()
             return await self.async_step_heat_pump()
         return self.async_show_form(
-            step_id="user",
+            step_id="data_sources",
             data_schema=self._schema_data_sources(user_input, self._flow_data),
         )
 
@@ -512,6 +676,12 @@ class HeatpumpMpcConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 [CONF_THERMAL_POWER_SENSOR,
                  CONF_FLOW_RATE_SENSOR, CONF_SUPPLY_TEMP_SENSOR, CONF_RETURN_TEMP_SENSOR],
             )
+            # COP-only: done after learning — no schedule or DHW steps.
+            if self._flow_data.get(CONF_OPERATION_MODE) == OP_MODE_COP_ONLY:
+                data = self._build_final_data()
+                ha_entity = data.get(CONF_HA_ENTITY_ID, "")
+                title = f"Heat Pump MPC ({ha_entity})" if ha_entity else "Heat Pump MPC"
+                return self.async_create_entry(title=title, data=data)
             return await self.async_step_schedule()
         return self.async_show_form(
             step_id="learning",
@@ -540,7 +710,7 @@ class HeatpumpMpcConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors = self._validate_dhw(user_input)
             if not errors:
                 self._flow_data.update(user_input)
-                self._clear_absent_entity_keys(user_input, [CONF_DHW_TEMP_SENSOR, CONF_DHW_OPERATION_SENSOR])
+                self._clear_absent_entity_keys(user_input, [CONF_DHW_TEMP_SENSOR, CONF_DHW_OPERATION_SENSOR, CONF_COIL_ENERGY_SENSOR])
                 data = self._build_final_data()
                 ha_entity = data.get(CONF_HA_ENTITY_ID, "")
                 title = f"Heat Pump MPC ({ha_entity})" if ha_entity else "Heat Pump MPC"
@@ -556,7 +726,7 @@ class HeatpumpMpcConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     # ------------------------------------------------------------------
 
     async def async_step_reconfigure(self, user_input=None) -> FlowResult:
-        """Step 1 (reconfigure): data sources."""
+        """Step 1 (reconfigure): system gatekeeper."""
         if user_input is None:
             entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
             if entry is None:
@@ -564,11 +734,28 @@ class HeatpumpMpcConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._entry = entry
             self._flow_data = {**entry.data}
         else:
+            if self._needs_reload_system(user_input):
+                return self.async_show_form(
+                    step_id="reconfigure",
+                    data_schema=self._schema_system(user_input, self._flow_data),
+                )
             self._flow_data.update(user_input)
-            self._clear_absent_entity_keys(user_input, [CONF_PRICE_SENSOR, CONF_HA_ENTITY_ID])
-            return await self.async_step_reconfigure_heat_pump()
+            return await self.async_step_reconfigure_data_sources()
         return self.async_show_form(
             step_id="reconfigure",
+            data_schema=self._schema_system(None, self._flow_data),
+        )
+
+    async def async_step_reconfigure_data_sources(self, user_input=None) -> FlowResult:
+        """Step 2 (reconfigure): data sources."""
+        if user_input is not None:
+            self._flow_data.update(user_input)
+            self._clear_absent_entity_keys(user_input, [CONF_PRICE_SENSOR, CONF_HA_ENTITY_ID])
+            if self._flow_data.get(CONF_OPERATION_MODE) == OP_MODE_COP_ONLY:
+                return await self.async_step_reconfigure_learning()
+            return await self.async_step_reconfigure_heat_pump()
+        return self.async_show_form(
+            step_id="reconfigure_data_sources",
             data_schema=self._schema_data_sources(None, self._flow_data),
         )
 
@@ -600,6 +787,10 @@ class HeatpumpMpcConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 [CONF_THERMAL_POWER_SENSOR,
                  CONF_FLOW_RATE_SENSOR, CONF_SUPPLY_TEMP_SENSOR, CONF_RETURN_TEMP_SENSOR],
             )
+            if self._flow_data.get(CONF_OPERATION_MODE) == OP_MODE_COP_ONLY:
+                return self.async_update_reload_and_abort(
+                    self._entry, data=self._build_final_data(),
+                )
             return await self.async_step_reconfigure_schedule()
         return self.async_show_form(
             step_id="reconfigure_learning",
@@ -628,7 +819,7 @@ class HeatpumpMpcConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors = self._validate_dhw(user_input)
             if not errors:
                 self._flow_data.update(user_input)
-                self._clear_absent_entity_keys(user_input, [CONF_DHW_TEMP_SENSOR, CONF_DHW_OPERATION_SENSOR])
+                self._clear_absent_entity_keys(user_input, [CONF_DHW_TEMP_SENSOR, CONF_DHW_OPERATION_SENSOR, CONF_COIL_ENERGY_SENSOR])
                 return self.async_update_reload_and_abort(
                     self._entry,
                     data=self._build_final_data(),
