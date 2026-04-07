@@ -47,6 +47,24 @@
 # LWT blueprint (pump_control_blueprint.yaml) instead.
 #
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# HARDWARE PROTECTION
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# This blueprint includes compressor protection features:
+#
+# - Guard time: minimum interval between offset writes (default 30 min).
+#   Prevents rapid cycling of the compressor.  Most inverter heat pumps
+#   need 15-45 min to stabilise after a setpoint change.
+#
+# - Offset rounding: values are rounded to the configured step size
+#   (default 1°C).  Many pumps only accept whole-degree offsets.
+#
+# - DHW pause: when the pump is in DHW mode, offset writes are blocked
+#   to avoid interfering with the internal DHW cycle.
+#
+# - Defrost pause: offset writes are blocked during defrost cycles.
+#
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # COMPATIBLE SYSTEMS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #
@@ -56,17 +74,15 @@
 #
 # Known compatible:
 #   - Daikin Altherma (via Daikin Residential Controller integration)
-#     → sensor.xxx_leaving_water_temperature
-#     → number.xxx_leaving_water_offset_heating
 #   - Daikin via BRP069C41 cloud adapter
-#     → similar entity structure
+#   - Any pump with weather-compensated curve + offset control
 #
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # INSTALLATION
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #
 # 1. Copy to config/blueprints/automation/heatpump_mpc/
-# 2. Reload automations
+# 2. Reload automations (or restart HA)
 # 3. Create automation from this blueprint
 # 4. Select your MPC and pump entities
 # 5. Set offset clamps appropriate for your unit
@@ -80,13 +96,13 @@ blueprint:
     For heat pumps with weather-compensated (OTC) curves that only allow
     an offset adjustment, not direct LWT control.  Computes the difference
     between the MPC's optimal LWT and the pump's OTC base, clamps it to
-    a safe range, and writes it as an offset.  A "nudge" mode — the pump's
-    OTC curve stays in charge.
+    a safe range, and writes it as an offset.  Includes compressor guard
+    time, DHW pause, defrost protection, and configurable rounding.
   domain: automation
 
   input:
     # ------------------------------------------------------------------
-    # MPC entities (source)
+    # MPC entities (source — read from these)
     # ------------------------------------------------------------------
     mpc_lwt_setpoint:
       name: "MPC LWT Setpoint"
@@ -107,15 +123,14 @@ blueprint:
           domain: binary_sensor
 
     # ------------------------------------------------------------------
-    # Heat pump entities (target)
+    # Heat pump entities (target — write to these)
     # ------------------------------------------------------------------
     pump_base_lwt_sensor:
       name: "Pump OTC base LWT sensor"
       description: >
         Sensor showing the pump's current weather-compensated LWT before
         any offset is applied.  On Daikin Altherma this is typically
-        sensor.xxx_leaving_water_temperature or the LWT setpoint sensor
-        from the OTC curve.
+        sensor.xxx_leaving_water_temperature.
       selector:
         entity:
           domain: sensor
@@ -123,14 +138,18 @@ blueprint:
     pump_offset_entity:
       name: "Pump LWT offset control"
       description: >
-        The number entity that controls the LWT offset on your pump.
-        On Daikin Altherma: number.xxx_leaving_water_offset_heating.
+        The number or climate entity that controls the LWT offset on
+        your pump.  On Daikin Altherma via cloud adapter this is
+        climate.xxx_leaving_water_offset; via Modbus it may be a
+        number entity.
       selector:
         entity:
-          domain: number
+          domain:
+            - number
+            - climate
 
     # ------------------------------------------------------------------
-    # Offset clamps
+    # Offset clamps & rounding
     # ------------------------------------------------------------------
     min_offset:
       name: "Minimum offset (°C)"
@@ -156,6 +175,52 @@ blueprint:
           max: 10
           step: 1
           unit_of_measurement: "°C"
+
+    offset_step:
+      name: "Offset step size (°C)"
+      description: >
+        Offsets are rounded to this increment before writing.  Most Daikin
+        units accept only whole degrees (1.0).  Set to 0.5 if your pump
+        supports half-degree steps.
+      default: 1.0
+      selector:
+        number:
+          min: 0.5
+          max: 2.0
+          step: 0.5
+          unit_of_measurement: "°C"
+
+    # ------------------------------------------------------------------
+    # Compressor protection
+    # ------------------------------------------------------------------
+    guard_time_minutes:
+      name: "Minimum time between offset writes (minutes)"
+      description: >
+        Prevents rapid setpoint changes that stress the compressor.
+        30 minutes is safe for most inverter pumps.  Increase to 45
+        for older or non-inverter units.
+      default: 30
+      selector:
+        number:
+          min: 5
+          max: 60
+          step: 5
+          unit_of_measurement: "min"
+
+    # ------------------------------------------------------------------
+    # DHW pause
+    # ------------------------------------------------------------------
+    dhw_active_sensor:
+      name: "DHW active sensor (optional)"
+      description: >
+        A binary sensor or the MPC's DHW mode sensor that reads 'on'
+        when the pump is running a DHW cycle.  Offset writes are paused
+        during DHW to avoid interfering with the pump's internal DHW
+        logic.  Leave empty if your pump does not signal DHW mode.
+      default: ""
+      selector:
+        entity:
+          domain: binary_sensor
 
     # ------------------------------------------------------------------
     # Defrost protection
@@ -189,23 +254,26 @@ trigger:
     id: pump_state_changed
 
 # ======================================================================
-# Conditions: none at top level — defrost guard is in the action block
+# Conditions: none at top level — guards are in the action block
 # ======================================================================
 condition: []
 
 # ======================================================================
-# Action: compute offset, clamp, write if changed
+# Action: guard → compute → round → clamp → write if changed
 # ======================================================================
 action:
   - variables:
       defrost_sensor_id: !input defrost_sensor
+      dhw_sensor_id: !input dhw_active_sensor
       mpc_lwt_entity: !input mpc_lwt_setpoint
       base_lwt_entity: !input pump_base_lwt_sensor
       offset_entity: !input pump_offset_entity
       clamp_min: !input min_offset
       clamp_max: !input max_offset
+      step: !input offset_step
+      guard_minutes: !input guard_time_minutes
 
-  # --- Defrost guard ---
+  # --- Defrost guard: block all writes during defrost ---
   - condition: template
     value_template: >
       {% if defrost_sensor_id %}
@@ -214,27 +282,64 @@ action:
         {{ true }}
       {% endif %}
 
+  # --- DHW guard: block writes during DHW cycle ---
+  - condition: template
+    value_template: >
+      {% if dhw_sensor_id %}
+        {{ states(dhw_sensor_id) != 'on' }}
+      {% else %}
+        {{ true }}
+      {% endif %}
+
+  # --- Guard time: minimum interval between writes ---
+  - condition: template
+    value_template: >
+      {% set last = states[offset_entity].last_changed %}
+      {% if last %}
+        {{ (now() - last).total_seconds() > (guard_minutes * 60) }}
+      {% else %}
+        {{ true }}
+      {% endif %}
+
   # --- Compute offset ---
   - variables:
       mpc_target: "{{ states(mpc_lwt_entity) | float(0) }}"
       pump_base: "{{ states(base_lwt_entity) | float(0) }}"
-      raw_offset: "{{ mpc_target - pump_base }}"
-      clamped_offset: "{{ [clamp_min, [raw_offset | round(0), clamp_max] | min] | max }}"
-      current_offset: "{{ states(offset_entity) | float(0) }}"
 
   # --- Skip if MPC or pump data is missing ---
   - condition: template
     value_template: "{{ mpc_target > 0 and pump_base > 0 }}"
 
-  # --- Only write if offset actually changed (±0.5°C deadband) ---
-  - condition: template
-    value_template: "{{ (clamped_offset - current_offset) | abs > 0.5 }}"
+  - variables:
+      raw_offset: "{{ mpc_target - pump_base }}"
+      # Round to step size, then clamp to [min, max]
+      rounded_offset: "{{ (raw_offset / step) | round(0) * step }}"
+      clamped_offset: "{{ [clamp_min, [rounded_offset, clamp_max] | min] | max }}"
+      current_offset: >
+        {% if offset_entity.startswith('climate.') %}
+          {{ state_attr(offset_entity, 'temperature') | float(0) }}
+        {% else %}
+          {{ states(offset_entity) | float(0) }}
+        {% endif %}
 
-  - service: number.set_value
+  # --- Only write if offset actually changed ---
+  - condition: template
+    value_template: "{{ (clamped_offset - current_offset) | abs >= (step * 0.9) }}"
+
+  - service: >
+      {% if offset_entity.startswith('climate.') %}
+        climate.set_temperature
+      {% else %}
+        number.set_value
+      {% endif %}
     target:
       entity_id: !input pump_offset_entity
-    data:
-      value: "{{ clamped_offset }}"
+    data: >
+      {% if offset_entity.startswith('climate.') %}
+        {{ {"temperature": clamped_offset} }}
+      {% else %}
+        {{ {"value": clamped_offset} }}
+      {% endif %}
 
-mode: queued
+mode: single
 max_exceeded: silent
