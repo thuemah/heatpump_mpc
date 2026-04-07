@@ -75,6 +75,17 @@ The MPC calculates the optimal leaving water temperature (LWT) setpoint and outp
 
 ### Recommended approach
 
+Two ready-made automation blueprints are available in the `tools/` folder:
+
+| Blueprint | Use case | File |
+|---|---|---|
+| **Direct LWT** | Full MPC control via Modbus, ESPAltherma, or climate entity | `pump_control_blueprint.yaml` |
+| **OTC Offset** | Pumps with weather-compensated curve + offset (e.g. Daikin Altherma cloud) | `pump_control_offset_blueprint.yaml` |
+
+Install by copying the YAML to `config/blueprints/automation/heatpump_mpc/` and creating an automation from the blueprint. Both include safety clamps, defrost protection, DHW pause, and compressor guard time.
+
+If your setup doesn't fit either blueprint, build a custom automation following these principles:
+
 1. Read `binary_sensor.heat_pump_mpc_pump_on` and `binary_sensor.heat_pump_mpc_dhw_mode_on` to decide whether to enable the pump and which mode it should be in.
 2. If DHW mode is on, write `number.heat_pump_mpc_dhw_setpoint` to the heat pump's DHW setpoint. (When DHW is not scheduled, writing the lower setpoint blocks unsolicited reheating).
 3. If SH (Space Heating) mode is on, read `number.heat_pump_mpc_lwt_setpoint` and write it to your pump's flow temperature setpoint *only when the value is within your pump's safe operating range*.
