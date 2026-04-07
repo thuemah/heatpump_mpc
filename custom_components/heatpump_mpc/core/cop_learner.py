@@ -80,8 +80,10 @@ _LIFT_MIN_K: float = 5.0
 # Observations shorter than this are too noisy (partial cycles, defrost start)
 _MIN_DURATION_HOURS: float = 0.25   # 15 minutes
 
-# Ignore run cycles with negligible heat output (standby, failed start)
-_MIN_HEAT_KWH: float = 0.05
+# Ignore run cycles with negligible heat output (standby, failed start,
+# circulation-only operation).  A 250 W floor (~0.125 kWh per 30-min window)
+# separates real heat production from pump circulation and standby losses.
+_MIN_HEAT_KWH: float = 0.12
 
 
 # ---------------------------------------------------------------------------

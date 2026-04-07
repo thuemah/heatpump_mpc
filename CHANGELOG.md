@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.2.1 — 2026-04-10
+
+### Improvements
+
+- **`t_room` in `get_cop_params` response:** Heating Analytics can now
+  compute cooling-mode Carnot COP (`η × T_room / (T_outdoor − T_room)`)
+  without additional service calls.  Prepares the interface for Track C
+  cooling support (see #49).
+
+- **COP learning: raised minimum heat threshold** from 0.05 to 0.12 kWh
+  per observation window (240W average).  Filters out circulation-only
+  operation that previously passed as valid COP observations, dragging
+  η_Carnot downward with unrealistically low COP values.
+
+- **Startup log suppression:** Service calls to weather, Heating Analytics,
+  and price sensors now log at DEBUG during HA boot (when entities are not
+  yet loaded) and WARNING only once HA is fully running.  Eliminates the
+  spurious "Failed to get weather forecast" warning on every restart.
+
 ## v0.2.0 — 2026-04-04
 
 ### New Features

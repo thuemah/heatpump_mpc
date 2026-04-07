@@ -408,7 +408,8 @@ Routing:
   `η_measured / η_Carnot_current` (α = 0.07)
 
 Quality guards reject observations with: COP outside [1.0, 7.0], lift < 5 K,
-duration < 15 min, heat < 0.05 kWh, or electrical energy ≤ 0.
+duration < 15 min, heat < 0.12 kWh (filters circulation-only operation),
+or electrical energy ≤ 0.
 
 The η_Carnot estimate is considered reliable after 20 clean-condition samples.
 
@@ -579,6 +580,42 @@ Runs every 30 minutes as a `DataUpdateCoordinator`.
 Modbus setpoint writing is handled by a separate HA automation that reads
 `number.lwt_setpoint` (which auto-tracks the MPC recommendation) and writes
 the value to the heat pump. The user controls the automation logic.
+
+---
+
+## Services
+
+### `heatpump_mpc.get_sh_hourly`
+
+Returns a rolling 48-entry buffer of completed per-hour SH thermal energy
+records.  Heating Analytics calls this at midnight to retrieve thermal
+production data for Track C.
+
+### `heatpump_mpc.get_cop_params`
+
+Returns the current COP model parameters so Heating Analytics can compute
+per-hour COP in the Track C midnight sync:
+
+```json
+{
+  "eta_carnot": 0.41,
+  "f_defrost": 0.85,
+  "defrost_temp_threshold": 7.0,
+  "defrost_rh_threshold": 70.0,
+  "lwt": 35.0,
+  "t_room": 21.0
+}
+```
+
+Heating Analytics evaluates per-hour COP as:
+- **Heating:** `COP = η × (LWT+273) / (LWT − T_outdoor)`
+- **Cooling:** `COP = η × (T_room+273) / (T_outdoor − T_room)`
+
+Defrost penalty is applied when `T_outdoor < defrost_temp_threshold` and
+`RH > defrost_rh_threshold`.
+
+Both services accept an optional `entry_id` parameter for multi-instance
+routing.
 
 ---
 

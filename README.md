@@ -1,6 +1,6 @@
 # Heat Pump MPC for Home Assistant
 
-> **STRICT WARNING:** This is an early alpha version. Using this integration will potentially "brick your heating system". There will be many breaking changes during development. Use at your own risk!
+> **WARNING — Beta software.** This integration calculates setpoints but does **not** control your heat pump directly — you build the control automation. Misconfigured automations can cause compressor lockouts, frozen pipes, or overheated floors. Always implement safety clamps in your automation and verify setpoints are within your system's safe operating range before writing them to the heat pump. Expect breaking changes between versions.
 
 This is a Home Assistant integration that calculates the most cost-effective running schedule for your heat pump. It works in tandem with *Heating Analytics* to understand your house's heat demand, and then determines when the heat pump should run, and with what leaving water temperature (LWT) and output level.
 
@@ -82,3 +82,21 @@ The MPC calculates the optimal leaving water temperature (LWT) setpoint and outp
 5. Do not write setpoints during defrost cycles — let the pump manage those itself.
 
 The integration runs every 30 minutes. A simple HA automation triggered on state change of the relevant entities is sufficient for most setups.
+
+### Understanding the schedule output
+
+The solver re-runs every 30 minutes and updates all sensor entities. **A sensor update is not a compressor start** — it is a plan refresh. The actual schedule is in the `schedule` attribute on `sensor.optimal_flow_temperature`:
+
+```yaml
+- hour: 0
+  pump_on: true
+  start_event: false   # ← only true on the FIRST hour of a run block
+  output_kw: 3.0       # ← minimum modulation, not full output
+  cop: 4.12
+  cost_per_kwh_heat: 0.24
+  tank_temp_c: 42.3
+```
+
+**`start_event: true`** is the only reliable indicator of a compressor start. A well-tuned system typically shows 1–3 start events per day — not 24. If you count `state_changed` events on `next_run_start` or `pump_on`, you will see ~48 per day (one per 30-minute refresh) even when the pump runs continuously.
+
+**Important for automation design:** trigger your automation on *state changes* of `binary_sensor.pump_on` (off→on or on→off transitions), not on every attribute update. And only write LWT to the heat pump when the value actually changes — some integrations restart the compressor on every setpoint write even if the value is identical.

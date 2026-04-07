@@ -113,6 +113,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "defrost_temp_threshold": state.defrost_t_threshold,
                 "defrost_rh_threshold": state.defrost_rh_threshold,
                 "lwt": coord.current_lwt,
+                "t_room": coord.current_t_room,
             }
 
         hass.services.async_register(

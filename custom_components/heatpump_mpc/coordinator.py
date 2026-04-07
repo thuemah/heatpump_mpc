@@ -711,6 +711,11 @@ class HeatpumpMpcCoordinator(DataUpdateCoordinator):
             return self._prev_optimal_lwt
         return float(self.entry.data.get(CONF_MIN_LWT, DEFAULT_MIN_LWT))
 
+    @property
+    def current_t_room(self) -> float:
+        """Configured indoor comfort temperature (°C)."""
+        return float(self.entry.data.get(CONF_T_ROOM, DEFAULT_T_ROOM))
+
     def _finalize_sh_hour_if_needed(self, now: datetime) -> None:
         """Flush the current SH accumulator to the buffer when the clock hour turns.
 

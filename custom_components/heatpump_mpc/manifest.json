@@ -1,7 +1,7 @@
 {
   "domain": "heatpump_mpc",
   "name": "Heat Pump MPC",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "config_flow": true,
   "documentation": "https://github.com/thuemah/heatpump_mpc",
   "issue_tracker": "https://github.com/thuemah/heatpump_mpc/issues",
