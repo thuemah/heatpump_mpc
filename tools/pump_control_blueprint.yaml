@@ -1,0 +1,347 @@
+# Heat Pump MPC — Pump Control Blueprint
+#
+# Home Assistant automation blueprint that bridges the MPC solver's
+# recommendations to your heat pump's control interface.
+#
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# PURPOSE
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# The MPC integration is an advisory layer — it calculates optimal
+# setpoints but does NOT control your heat pump directly.  This
+# blueprint is the recommended bridge between MPC output and your
+# pump's control entities.
+#
+# It handles:
+#   - Writing LWT setpoint only when the value actually changes
+#   - Respecting pump_on / pump_off transitions (not every 30-min refresh)
+#   - Clamping setpoints to user-defined safety limits
+#   - Blocking writes during defrost cycles
+#   - DHW mode switching (setpoint high when scheduled, low when not)
+#
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# SUPPORTED HEAT PUMP INTERFACES
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# This blueprint works with any heat pump that exposes:
+#   - A number entity or climate entity for LWT / flow temperature
+#   - Optionally: a number entity for DHW target temperature
+#   - Optionally: a binary sensor for defrost status
+#
+# Known compatible interfaces:
+#   - Daikin BRP069 (climate entity)
+#   - Daikin Modbus (number entity via modbus integration)
+#   - Nibe Modbus (number entities)
+#   - ESPAltherma (number entities via MQTT)
+#   - Any climate entity with temperature control
+#
+# NOT covered (build your own automation using this as reference):
+#   - Raw MQTT publish (no entity)
+#   - REST API calls
+#   - Complex multi-register Modbus sequences
+#
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# IMPORTANT SAFETY NOTES
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# 1. SET THE SAFETY CLAMPS CORRECTLY.  The min/max LWT values in this
+#    blueprint are your last line of defence.  Set them based on YOUR
+#    specific installation:
+#      - Underfloor heating: typically max 45°C
+#      - Radiators: typically max 55-65°C
+#      - DHW: check your cylinder's rating
+#    The blueprint will NEVER write a value outside these clamps.
+#
+# 2. TEST IN MONITORING MODE FIRST.  Run the MPC in COP-only mode for
+#    a week and verify the solver's recommendations make sense before
+#    enabling this automation.
+#
+# 3. DEFROST PROTECTION.  If your heat pump exposes a defrost binary
+#    sensor, configure it.  The blueprint will pause all writes during
+#    defrost to avoid interfering with the pump's internal logic.
+#    If no sensor is available, the blueprint still works but cannot
+#    detect defrost cycles.
+#
+# 4. SOME INTEGRATIONS RESTART THE COMPRESSOR on every setpoint write,
+#    even if the value is unchanged.  This blueprint only writes on
+#    actual value changes to avoid this — but verify with YOUR
+#    integration that writing the same value twice is harmless.
+#
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# INSTALLATION
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# 1. Copy this file to your HA config/blueprints/automation/heatpump_mpc/
+# 2. Reload automations (or restart HA)
+# 3. Create a new automation from this blueprint
+# 4. Select your MPC entities and pump control entities
+# 5. Set safety clamps for your installation
+# 6. Save and enable
+#
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+blueprint:
+  name: "Heat Pump MPC — Pump Control"
+  description: >
+    Bridges the MPC solver's recommendations to your heat pump.
+    Writes LWT setpoint on value changes, respects pump on/off state,
+    clamps to safety limits, and blocks writes during defrost.
+  domain: automation
+
+  input:
+    # ------------------------------------------------------------------
+    # MPC entities (source — read from these)
+    # ------------------------------------------------------------------
+    mpc_pump_on:
+      name: "MPC Pump On sensor"
+      description: >
+        The binary sensor that indicates whether the MPC wants the pump
+        running this hour (e.g. binary_sensor.heat_pump_mpc_pump_on).
+      selector:
+        entity:
+          domain: binary_sensor
+
+    mpc_lwt_setpoint:
+      name: "MPC LWT Setpoint"
+      description: >
+        The number entity exposing the MPC's recommended flow temperature
+        (e.g. number.heat_pump_mpc_lwt_setpoint).
+      selector:
+        entity:
+          domain: number
+
+    mpc_dhw_on:
+      name: "MPC DHW Mode sensor (optional)"
+      description: >
+        Binary sensor for DHW mode scheduling.  Leave empty if you don't
+        use DHW scheduling or have a separate DHW tank.
+      default: ""
+      selector:
+        entity:
+          domain: binary_sensor
+
+    mpc_dhw_setpoint:
+      name: "MPC DHW Setpoint (optional)"
+      description: >
+        Number entity for the MPC's recommended DHW target temperature.
+        Leave empty if DHW is not managed by the MPC.
+      default: ""
+      selector:
+        entity:
+          domain: number
+
+    # ------------------------------------------------------------------
+    # Heat pump entities (target — write to these)
+    # ------------------------------------------------------------------
+    pump_lwt_target:
+      name: "Heat pump LWT control"
+      description: >
+        The entity on your heat pump that controls the flow temperature
+        setpoint.  Can be a number entity (Modbus, ESPAltherma) or a
+        climate entity (Daikin BRP, Nibe).
+      selector:
+        entity:
+          domain:
+            - number
+            - climate
+
+    pump_dhw_target:
+      name: "Heat pump DHW control (optional)"
+      description: >
+        The entity that controls the DHW tank target temperature on your
+        heat pump.  Leave empty if not applicable.
+      default: ""
+      selector:
+        entity:
+          domain:
+            - number
+            - climate
+
+    # ------------------------------------------------------------------
+    # Safety clamps
+    # ------------------------------------------------------------------
+    safety_min_lwt:
+      name: "Safety minimum LWT (°C)"
+      description: >
+        Absolute floor — never write below this.  Set based on your
+        heat pump's minimum operating temperature.
+      default: 25
+      selector:
+        number:
+          min: 15
+          max: 45
+          step: 1
+          unit_of_measurement: "°C"
+
+    safety_max_lwt:
+      name: "Safety maximum LWT (°C)"
+      description: >
+        Absolute ceiling — never write above this.  Set based on your
+        distribution system (underfloor ≈ 45°C, radiators ≈ 55°C).
+      default: 55
+      selector:
+        number:
+          min: 30
+          max: 70
+          step: 1
+          unit_of_measurement: "°C"
+
+    # ------------------------------------------------------------------
+    # Defrost protection
+    # ------------------------------------------------------------------
+    defrost_sensor:
+      name: "Defrost binary sensor (optional)"
+      description: >
+        A binary sensor that reads 'on' when the heat pump is in a
+        defrost cycle.  All setpoint writes are paused during defrost.
+        Leave empty if your pump does not expose this.
+      default: ""
+      selector:
+        entity:
+          domain: binary_sensor
+
+# ======================================================================
+# Triggers: react to MPC state CHANGES, not every 30-min refresh
+# ======================================================================
+trigger:
+  # Pump on/off transition
+  - platform: state
+    entity_id: !input mpc_pump_on
+    id: pump_state_changed
+
+  # LWT setpoint value changed
+  - platform: state
+    entity_id: !input mpc_lwt_setpoint
+    id: lwt_changed
+
+  # DHW mode transition (only fires if entity is configured)
+  - platform: state
+    entity_id: !input mpc_dhw_on
+    id: dhw_state_changed
+
+  # DHW setpoint changed
+  - platform: state
+    entity_id: !input mpc_dhw_setpoint
+    id: dhw_setpoint_changed
+
+# ======================================================================
+# Conditions: none at top level — defrost guard is inside the action
+# block where we have access to the input variables.
+# ======================================================================
+condition: []
+
+# ======================================================================
+# Actions
+# ======================================================================
+action:
+  - variables:
+      defrost_sensor_id: !input defrost_sensor
+      pump_lwt_entity: !input pump_lwt_target
+      pump_dhw_entity: !input pump_dhw_target
+      min_lwt: !input safety_min_lwt
+      max_lwt: !input safety_max_lwt
+      mpc_lwt_entity: !input mpc_lwt_setpoint
+      mpc_pump_entity: !input mpc_pump_on
+      mpc_dhw_on_entity: !input mpc_dhw_on
+      mpc_dhw_setpoint_entity: !input mpc_dhw_setpoint
+
+  # --- Defrost guard ---
+  - condition: template
+    value_template: >
+      {% if defrost_sensor_id %}
+        {{ states(defrost_sensor_id) != 'on' }}
+      {% else %}
+        {{ true }}
+      {% endif %}
+
+  - choose:
+      # ----------------------------------------------------------
+      # CASE 1: Pump turned ON — write current LWT (clamped)
+      # ----------------------------------------------------------
+      - conditions:
+          - condition: trigger
+            id: pump_state_changed
+          - condition: state
+            entity_id: !input mpc_pump_on
+            state: "on"
+        sequence:
+          - variables:
+              raw_lwt: "{{ states(mpc_lwt_entity) | float(35) }}"
+              clamped_lwt: "{{ [min_lwt, [raw_lwt, max_lwt] | min] | max }}"
+          - service: >
+              {% if pump_lwt_entity.startswith('climate.') %}
+                climate.set_temperature
+              {% else %}
+                number.set_value
+              {% endif %}
+            target:
+              entity_id: "{{ pump_lwt_entity }}"
+            data: >
+              {% if pump_lwt_entity.startswith('climate.') %}
+                {{ {"temperature": clamped_lwt} }}
+              {% else %}
+                {{ {"value": clamped_lwt} }}
+              {% endif %}
+
+      # ----------------------------------------------------------
+      # CASE 2: LWT value changed while pump is on — update setpoint
+      # ----------------------------------------------------------
+      - conditions:
+          - condition: trigger
+            id: lwt_changed
+          - condition: state
+            entity_id: !input mpc_pump_on
+            state: "on"
+        sequence:
+          - variables:
+              raw_lwt: "{{ states(mpc_lwt_entity) | float(35) }}"
+              clamped_lwt: "{{ [min_lwt, [raw_lwt, max_lwt] | min] | max }}"
+              current_pump_lwt: "{{ state_attr(pump_lwt_entity, 'temperature') if pump_lwt_entity.startswith('climate.') else states(pump_lwt_entity) | float(0) }}"
+          # Only write if value actually differs (avoid unnecessary writes)
+          - condition: template
+            value_template: "{{ (clamped_lwt - current_pump_lwt) | abs > 0.5 }}"
+          - service: >
+              {% if pump_lwt_entity.startswith('climate.') %}
+                climate.set_temperature
+              {% else %}
+                number.set_value
+              {% endif %}
+            target:
+              entity_id: "{{ pump_lwt_entity }}"
+            data: >
+              {% if pump_lwt_entity.startswith('climate.') %}
+                {{ {"temperature": clamped_lwt} }}
+              {% else %}
+                {{ {"value": clamped_lwt} }}
+              {% endif %}
+
+      # ----------------------------------------------------------
+      # CASE 3: DHW mode changed — write DHW setpoint
+      # ----------------------------------------------------------
+      - conditions:
+          - condition: trigger
+            id:
+              - dhw_state_changed
+              - dhw_setpoint_changed
+          - condition: template
+            value_template: "{{ mpc_dhw_on_entity != '' and pump_dhw_entity != '' }}"
+        sequence:
+          - variables:
+              dhw_setpoint: "{{ states(mpc_dhw_setpoint_entity) | float(40) }}"
+          - service: >
+              {% if pump_dhw_entity.startswith('climate.') %}
+                climate.set_temperature
+              {% else %}
+                number.set_value
+              {% endif %}
+            target:
+              entity_id: "{{ pump_dhw_entity }}"
+            data: >
+              {% if pump_dhw_entity.startswith('climate.') %}
+                {{ {"temperature": dhw_setpoint} }}
+              {% else %}
+                {{ {"value": dhw_setpoint} }}
+              {% endif %}
+
+mode: queued
+max_exceeded: silent

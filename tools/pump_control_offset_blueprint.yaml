@@ -1,0 +1,240 @@
+# Heat Pump MPC — OTC Offset Control Blueprint
+#
+# Home Assistant automation blueprint for heat pumps that do NOT allow
+# direct LWT control — only an offset against the built-in weather-
+# dependent (OTC / weather-compensated) heating curve.
+#
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# HOW IT WORKS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# The MPC solver calculates an optimal absolute LWT (e.g. 32°C).
+# Your heat pump's OTC curve also calculates a base LWT (e.g. 38°C).
+# This blueprint computes the difference and writes it as an offset:
+#
+#   offset = MPC_target - pump_base_LWT
+#   offset = 32 - 38 = -6°C → clamped to min_offset → -5°C
+#
+# The pump then runs at: OTC_base + offset = 38 + (-5) = 33°C
+#
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# LIMITATIONS — READ BEFORE USING
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# This is a "nudge" mode, NOT full MPC control:
+#
+# 1. The pump's OTC curve remains in charge.  The MPC can shift the
+#    curve up or down within the offset clamp range, but cannot
+#    override it entirely.  If OTC says 40°C and offset range is
+#    ±5°C, the pump will run between 35-45°C regardless of what the
+#    MPC recommends.
+#
+# 2. Load-shifting is limited.  Full MPC can pre-charge a tank at
+#    high LWT during cheap hours and coast during expensive ones.
+#    With offset mode, the OTC base tracks outdoor temp in real-time
+#    — you can't "pre-heat at +5 offset" because the pump will also
+#    raise its base LWT when it gets cold.
+#
+# 3. The MPC cannot turn the pump off.  This blueprint only adjusts
+#    the temperature offset — on/off control is still handled by
+#    the pump's own thermostat logic.  The pump_on signal from MPC
+#    is used to decide WHEN to recalculate, not to start/stop.
+#
+# 4. Offset range varies by manufacturer.  Daikin Altherma typically
+#    allows -10 to +10°C.  Check YOUR unit's documentation.
+#
+# For full MPC control, use ESPAltherma (Modbus) with the direct
+# LWT blueprint (pump_control_blueprint.yaml) instead.
+#
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# COMPATIBLE SYSTEMS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Any heat pump that exposes:
+#   - A sensor showing the current OTC-calculated base LWT
+#   - A number entity for the LWT offset adjustment
+#
+# Known compatible:
+#   - Daikin Altherma (via Daikin Residential Controller integration)
+#     → sensor.xxx_leaving_water_temperature
+#     → number.xxx_leaving_water_offset_heating
+#   - Daikin via BRP069C41 cloud adapter
+#     → similar entity structure
+#
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# INSTALLATION
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# 1. Copy to config/blueprints/automation/heatpump_mpc/
+# 2. Reload automations
+# 3. Create automation from this blueprint
+# 4. Select your MPC and pump entities
+# 5. Set offset clamps appropriate for your unit
+# 6. Start conservative (±3°C) and widen once you trust the output
+#
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+blueprint:
+  name: "Heat Pump MPC — OTC Offset Control"
+  description: >
+    For heat pumps with weather-compensated (OTC) curves that only allow
+    an offset adjustment, not direct LWT control.  Computes the difference
+    between the MPC's optimal LWT and the pump's OTC base, clamps it to
+    a safe range, and writes it as an offset.  A "nudge" mode — the pump's
+    OTC curve stays in charge.
+  domain: automation
+
+  input:
+    # ------------------------------------------------------------------
+    # MPC entities (source)
+    # ------------------------------------------------------------------
+    mpc_lwt_setpoint:
+      name: "MPC LWT Setpoint"
+      description: >
+        The MPC's recommended absolute flow temperature
+        (e.g. number.heat_pump_mpc_lwt_setpoint).
+      selector:
+        entity:
+          domain: number
+
+    mpc_pump_on:
+      name: "MPC Pump On sensor"
+      description: >
+        Used to recalculate the offset when the MPC schedule changes.
+        The blueprint does NOT start/stop the pump — only adjusts offset.
+      selector:
+        entity:
+          domain: binary_sensor
+
+    # ------------------------------------------------------------------
+    # Heat pump entities (target)
+    # ------------------------------------------------------------------
+    pump_base_lwt_sensor:
+      name: "Pump OTC base LWT sensor"
+      description: >
+        Sensor showing the pump's current weather-compensated LWT before
+        any offset is applied.  On Daikin Altherma this is typically
+        sensor.xxx_leaving_water_temperature or the LWT setpoint sensor
+        from the OTC curve.
+      selector:
+        entity:
+          domain: sensor
+
+    pump_offset_entity:
+      name: "Pump LWT offset control"
+      description: >
+        The number entity that controls the LWT offset on your pump.
+        On Daikin Altherma: number.xxx_leaving_water_offset_heating.
+      selector:
+        entity:
+          domain: number
+
+    # ------------------------------------------------------------------
+    # Offset clamps
+    # ------------------------------------------------------------------
+    min_offset:
+      name: "Minimum offset (°C)"
+      description: >
+        Most negative offset allowed.  -5°C is conservative.  Check your
+        pump's documentation for the supported range (Daikin: -10 to +10).
+      default: -5
+      selector:
+        number:
+          min: -10
+          max: 0
+          step: 1
+          unit_of_measurement: "°C"
+
+    max_offset:
+      name: "Maximum offset (°C)"
+      description: >
+        Most positive offset allowed.  +5°C is conservative.
+      default: 5
+      selector:
+        number:
+          min: 0
+          max: 10
+          step: 1
+          unit_of_measurement: "°C"
+
+    # ------------------------------------------------------------------
+    # Defrost protection
+    # ------------------------------------------------------------------
+    defrost_sensor:
+      name: "Defrost binary sensor (optional)"
+      description: >
+        Pauses offset writes during defrost.  Leave empty if not available.
+      default: ""
+      selector:
+        entity:
+          domain: binary_sensor
+
+# ======================================================================
+# Triggers
+# ======================================================================
+trigger:
+  # MPC updated its recommended LWT
+  - platform: state
+    entity_id: !input mpc_lwt_setpoint
+    id: mpc_lwt_changed
+
+  # Pump's OTC base LWT changed (outdoor temp shifted the curve)
+  - platform: state
+    entity_id: !input pump_base_lwt_sensor
+    id: pump_base_changed
+
+  # MPC schedule changed (pump_on transition)
+  - platform: state
+    entity_id: !input mpc_pump_on
+    id: pump_state_changed
+
+# ======================================================================
+# Conditions: none at top level — defrost guard is in the action block
+# ======================================================================
+condition: []
+
+# ======================================================================
+# Action: compute offset, clamp, write if changed
+# ======================================================================
+action:
+  - variables:
+      defrost_sensor_id: !input defrost_sensor
+      mpc_lwt_entity: !input mpc_lwt_setpoint
+      base_lwt_entity: !input pump_base_lwt_sensor
+      offset_entity: !input pump_offset_entity
+      clamp_min: !input min_offset
+      clamp_max: !input max_offset
+
+  # --- Defrost guard ---
+  - condition: template
+    value_template: >
+      {% if defrost_sensor_id %}
+        {{ states(defrost_sensor_id) != 'on' }}
+      {% else %}
+        {{ true }}
+      {% endif %}
+
+  # --- Compute offset ---
+  - variables:
+      mpc_target: "{{ states(mpc_lwt_entity) | float(0) }}"
+      pump_base: "{{ states(base_lwt_entity) | float(0) }}"
+      raw_offset: "{{ mpc_target - pump_base }}"
+      clamped_offset: "{{ [clamp_min, [raw_offset | round(0), clamp_max] | min] | max }}"
+      current_offset: "{{ states(offset_entity) | float(0) }}"
+
+  # --- Skip if MPC or pump data is missing ---
+  - condition: template
+    value_template: "{{ mpc_target > 0 and pump_base > 0 }}"
+
+  # --- Only write if offset actually changed (±0.5°C deadband) ---
+  - condition: template
+    value_template: "{{ (clamped_offset - current_offset) | abs > 0.5 }}"
+
+  - service: number.set_value
+    target:
+      entity_id: !input pump_offset_entity
+    data:
+      value: "{{ clamped_offset }}"
+
+mode: queued
+max_exceeded: silent
